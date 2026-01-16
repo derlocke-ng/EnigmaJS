@@ -7,7 +7,7 @@
 ## ✨ Features
 
 - 🔒 End-to-end encrypted messaging
-- 🌐 Peer-to-peer connections (Gun.js)
+- 🌐 Gun.js for networking
 - 📱 QR code joining
 - 👥 Multi-user rooms (up to 10 users)
 - 🎨 Light & dark mode
