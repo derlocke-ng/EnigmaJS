@@ -6,7 +6,7 @@ EnigmaJS is a web-based encrypted messaging app that connects users directly thr
 
 ## ✨ Key Features
 
-- **🔒 End-to-End Encryption** - Messages are encrypted using Gun.js SEA (Security, Encryption, Authorization)
+- **🔒 End-to-End Encryption** - Messages are encrypted using Gun.js SEA cryptographic library
 - **🌐 Peer-to-Peer** - Direct connections between users via Gun.js decentralized network
 - **🚫 No Data Storage** - Nothing is saved on servers or your device
 - **📱 QR Code Connect** - Quickly join rooms by scanning a QR code
@@ -73,7 +73,7 @@ You have three ways to join:
 
 - **End-to-End Encryption** - All messages are encrypted before leaving your device
 - **No Server Storage** - Messages only exist in active sessions, nothing is saved
-- **Peer-to-Peer Network** - Direct connections via Gun.js relay servers (only for routing, not storage)
+- **Peer-to-Peer Network** - Direct connections via Gun.js decentralized relay network
 - **Ephemeral Rooms** - Rooms disappear when everyone leaves
 - **No Registration** - No accounts, emails, or personal data required
 
@@ -111,7 +111,7 @@ Need more details? Click **"Debug Info & Logs"** at the bottom to see:
 ## 💡 Tips
 
 - **Stable Connection** - Keep the browser tab open while chatting
-- **Room Capacity** - Maximum 10 users per room (default)
+- **Room Capacity** - Maximum 10 users per room
 - **Privacy First** - Close the tab to destroy the conversation completely
 - **Dark Mode** - Click the moon/sun icon in the top right corner
 
