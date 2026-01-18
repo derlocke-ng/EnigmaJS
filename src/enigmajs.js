@@ -1652,21 +1652,17 @@ export class EnigmaJS {
       return;
     }
 
-    // Must be from the current host
-    if (data.sender !== this.hostPeerId) {
-      this.log("Ignoring heir-secrets from non-host", "warn");
-      return;
-    }
-
-    // Decrypt and cache the secrets using ECDH
-    const hostKeys = this.peerKeys.get(data.sender);
-    if (!hostKeys || !hostKeys.epub) {
-      this.log("Cannot decrypt heir-secrets: missing host keys", "warn");
+    // Accept from current host OR from anyone we have keys for
+    // (heir-secrets might arrive before promote-notify due to Gun.js message ordering)
+    // Signature verification already ensures the sender is legitimate
+    const senderKeys = this.peerKeys.get(data.sender);
+    if (!senderKeys || !senderKeys.epub) {
+      this.log("Cannot decrypt heir-secrets: missing sender keys", "warn");
       return;
     }
 
     try {
-      const dhKey = await SEA.secret(hostKeys.epub, this.seaKeyPair);
+      const dhKey = await SEA.secret(senderKeys.epub, this.seaKeyPair);
       this.cachedHeirSecrets = {
         sharedSecret: data.encryptedSharedSecret
           ? await SEA.decrypt(data.encryptedSharedSecret, dhKey)
@@ -1675,7 +1671,7 @@ export class EnigmaJS {
           ? await SEA.decrypt(data.encryptedRoomPassword, dhKey)
           : null,
       };
-      this.log("Received heir secrets from host", "info");
+      this.log(`Received heir secrets from ${data.sender}`, "info");
     } catch (e) {
       this.log(`Failed to decrypt heir-secrets: ${e.message}`, "warn");
     }

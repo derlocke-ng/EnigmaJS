@@ -1,5 +1,13 @@
 # EnigmaJS Changelog
 
+## [2.2.1] - 2026-01-18 - Heir Secrets Race Fix
+
+### Bug Fixes
+
+- 🐛 **Fixed heir-secrets race condition** - `heir-secrets` could arrive before `promote-notify` due to Gun.js message ordering. Now accepts secrets from any verified sender (signature verification ensures legitimacy).
+
+---
+
 ## [2.2.0] - 2026-01-18 - Heir Secrets
 
 ### 🔐 New Feature
