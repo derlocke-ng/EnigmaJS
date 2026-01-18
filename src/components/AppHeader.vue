@@ -37,7 +37,7 @@ async function toggleNotifications() {
   <div class="header-row">
     <div></div>
     <div class="header-center">
-      <a href="/" class="logo-link" title="Reload EnigmaJS">
+      <a href="./" class="logo-link" title="Reload EnigmaJS">
         <h1>🔐 EnigmaJS</h1>
       </a>
     </div>
