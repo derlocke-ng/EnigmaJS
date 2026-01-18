@@ -72,8 +72,8 @@ Your messages pass through Gun.js relays as encrypted blobs — they can't read 
 
 ## ⚠️ License
 
-**No license.** This project is shared for personal use only. Please don't fork, redistribute, or use it commercially.
+[PolyForm Noncommercial 1.0.0](LICENSE) — Free for personal use. No commercial use.
 
 ---
 
-*Made with ❤️ for private conversations*
+*Made with 🥝 for private conversations*
