@@ -1173,8 +1173,9 @@ export class EnigmaJS {
 
     this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
 
-    // Transfer complete - demote self
+    // Transfer complete - demote self and update host tracking
     this.isHost = false;
+    this.hostPeerId = peerId; // Track the new host
     this.log(`${username} is now the host`, "success", true);
     this.updateConnectionInfo();
   }
