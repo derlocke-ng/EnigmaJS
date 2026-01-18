@@ -70,13 +70,14 @@ export class EnigmaJS {
   }
 
   /**
-   * Hash a password using SHA-256
+   * Hash a password using SHA-256 with optional salt
    * @param {string} password - Plain text password
+   * @param {string} salt - Salt (typically roomId)
    * @returns {Promise<string>} Hex-encoded hash
    */
-  async hashPassword(password) {
+  async hashPassword(password, salt = "") {
     const encoder = new TextEncoder();
-    const data = encoder.encode(password);
+    const data = encoder.encode(password + salt);
     const hashBuffer = await crypto.subtle.digest("SHA-256", data);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -443,7 +444,9 @@ export class EnigmaJS {
     this.log("Message listener active", "info");
 
     // Send join message with SEA keys
-    const hashedPassword = password ? await this.hashPassword(password) : null;
+    const hashedPassword = password
+      ? await this.hashPassword(password, this.roomId)
+      : null;
     const joinMsg = {
       id: this.generateId(),
       type: "join",
@@ -629,6 +632,9 @@ export class EnigmaJS {
             break;
           case "pong":
             this.handlePong(data);
+            break;
+          case "rekey":
+            Promise.resolve(this.handleRekey(data));
             break;
         }
       });
@@ -1147,7 +1153,7 @@ export class EnigmaJS {
    * Kick a user from the room (host only)
    * @param {string} peerId - ID of peer to kick
    */
-  kickUser(peerId) {
+  async kickUser(peerId) {
     if (!this.isHost) return;
 
     const userInfo = this.peerInfo.get(peerId);
@@ -1182,7 +1188,94 @@ export class EnigmaJS {
     this.peerLastSeen.delete(peerId);
 
     this.log(`Kicked ${username} from room`, "warn", true);
+
+    // Re-key: Generate new shared secret and distribute to remaining peers
+    // This ensures kicked user can't read new messages
+    if (this.peers.size > 0) {
+      await this.rekeyRoom();
+    }
+
     this.updateConnectionInfo();
+  }
+
+  /**
+   * Generate new room key and distribute to all remaining peers
+   * Called after kicking a user to invalidate their key
+   */
+  async rekeyRoom() {
+    this.log("Generating new room key...", "info");
+
+    // Generate new shared secret
+    const newSecret = new Uint8Array(32);
+    crypto.getRandomValues(newSecret);
+    const newSharedSecret = Array.from(newSecret, (b) =>
+      b.toString(16).padStart(2, "0"),
+    ).join("");
+
+    // Encrypt new secret for each remaining peer using their ECDH key
+    const encryptedKeys = {};
+    for (const [peerId, keys] of this.peerKeys.entries()) {
+      if (this.peers.has(peerId) && keys.epub) {
+        try {
+          const derivedKey = await SEA.secret(keys.epub, this.seaKeyPair);
+          const encrypted = await SEA.encrypt(newSharedSecret, derivedKey);
+          encryptedKeys[peerId] = encrypted;
+        } catch (err) {
+          this.log(`Failed to encrypt key for ${peerId}: ${err.message}`, "error");
+        }
+      }
+    }
+
+    // Broadcast rekey message
+    const rekeyMsg = {
+      id: this.generateId(),
+      type: "rekey",
+      sender: this.peerId,
+      encryptedKeys: JSON.stringify(encryptedKeys),
+      timestamp: Date.now(),
+    };
+    this.room.get("messages").get(rekeyMsg.id).put(rekeyMsg);
+
+    // Update our own key
+    this.sharedSecret = newSharedSecret;
+    this.log("Room key rotated (kicked user can no longer read messages)", "success", true);
+  }
+
+  /**
+   * Handle rekey message (new room key after someone was kicked)
+   * @param {Object} data - Rekey message data
+   */
+  async handleRekey(data) {
+    // Only process if we're not the host (host already has new key)
+    if (this.isHost) return;
+
+    try {
+      const encryptedKeys = JSON.parse(data.encryptedKeys);
+      const myEncryptedKey = encryptedKeys[this.peerId];
+
+      if (!myEncryptedKey) {
+        this.log("No new key for us in rekey message", "warn");
+        return;
+      }
+
+      // Get host's public key
+      const hostKeys = this.peerKeys.get(data.sender);
+      if (!hostKeys || !hostKeys.epub) {
+        this.log("Cannot decrypt new key: missing host public key", "error");
+        return;
+      }
+
+      // Decrypt new shared secret
+      const derivedKey = await SEA.secret(hostKeys.epub, this.seaKeyPair);
+      const newSharedSecret = await SEA.decrypt(myEncryptedKey, derivedKey);
+
+      if (newSharedSecret) {
+        this.sharedSecret = newSharedSecret;
+        this.log("Room key updated", "info", true);
+      }
+    } catch (err) {
+      this.log(`Failed to process rekey: ${err.message}`, "error");
+    }
   }
 
   /**
@@ -1234,8 +1327,10 @@ export class EnigmaJS {
       this.log("Cannot set password: not host", "error", true);
       return;
     }
-    // Store hashed password
-    this.roomPassword = password ? await this.hashPassword(password) : null;
+    // Store hashed password with roomId as salt
+    this.roomPassword = password
+      ? await this.hashPassword(password, this.roomId)
+      : null;
     this.log(
       password ? "Room password set" : "Room password removed",
       "success",

@@ -206,10 +206,19 @@ export function useEnigma() {
         .put(destroyMsg);
     }
 
-    // Kick all users
+    // Kick all users (no rekey needed since room is being destroyed)
     const peersToKick = [...enigmaInstance.value.peers];
     for (const peerId of peersToKick) {
-      enigmaInstance.value.kickUser(peerId);
+      // Direct kick without rekey for destroy
+      enigmaInstance.value.kickedUsers.add(peerId);
+      const kickMsg = {
+        id: enigmaInstance.value.generateId(),
+        type: "kick",
+        sender: enigmaInstance.value.peerId,
+        target: peerId,
+        timestamp: Date.now(),
+      };
+      enigmaInstance.value.room.get("messages").get(kickMsg.id).put(kickMsg);
     }
 
     // Reset local state
@@ -288,9 +297,9 @@ export function useEnigma() {
   /**
    * Kick a user (host only)
    */
-  function kickUser(peerId) {
+  async function kickUser(peerId) {
     if (!enigmaInstance.value?.isHost) return;
-    enigmaInstance.value.kickUser(peerId);
+    await enigmaInstance.value.kickUser(peerId);
   }
 
   /**
