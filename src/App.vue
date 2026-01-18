@@ -31,8 +31,8 @@ onMounted(() => {
         <strong>🔒 Private & Secure:</strong> End-to-end encrypted messaging
         with no data stored anywhere.
         <br />
-        <strong>🌐 Decentralized:</strong> Powered by Gun.js peer-to-peer
-        network.
+        <strong>🌐 Decentralized:</strong> Powered by community-hosted Gun.js
+        relay nodes.
       </p>
     </div>
 
