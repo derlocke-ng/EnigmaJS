@@ -1027,8 +1027,15 @@ export class EnigmaJS {
     this.log("You have been kicked from the room", "error", true);
     this.setStatus("disconnected", "Kicked by host");
     this.connected = false;
+
+    // Clear all sensitive data
+    this.sharedSecret = null;
+    this.seaKeyPair = null;
+    this.peerKeys.clear();
     this.peers.clear();
     this.peerInfo.clear();
+    this.cachedRoomSettings = null;
+
     this.updateConnectionInfo();
     // Clear the room
     if (this.room) {
@@ -1221,7 +1228,10 @@ export class EnigmaJS {
           const encrypted = await SEA.encrypt(newSharedSecret, derivedKey);
           encryptedKeys[peerId] = encrypted;
         } catch (err) {
-          this.log(`Failed to encrypt key for ${peerId}: ${err.message}`, "error");
+          this.log(
+            `Failed to encrypt key for ${peerId}: ${err.message}`,
+            "error",
+          );
         }
       }
     }
@@ -1238,7 +1248,11 @@ export class EnigmaJS {
 
     // Update our own key
     this.sharedSecret = newSharedSecret;
-    this.log("Room key rotated (kicked user can no longer read messages)", "success", true);
+    this.log(
+      "Room key rotated (kicked user can no longer read messages)",
+      "success",
+      true,
+    );
   }
 
   /**
