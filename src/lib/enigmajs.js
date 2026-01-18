@@ -14,7 +14,9 @@ export class EnigmaJS {
     this.roomId = null;
     this.isHost = false;
     this.verbose = false;
-    this.username = options.username || "Anonymous";
+    // Ensure username is always a non-empty string (Gun can have issues with numeric strings)
+    this.username =
+      String(options.username || "Anonymous").trim() || "Anonymous";
 
     // Callbacks for UI updates
     this.onLog = options.onLog || console.log;
@@ -189,7 +191,19 @@ export class EnigmaJS {
       this.onPromoted();
     }
 
-    // Broadcast that we're the new host so others know (include room settings)
+    // Serialize peerKeys for broadcast (in case other peers need them)
+    const peerKeysArray = [];
+    for (const [pid, keys] of this.peerKeys.entries()) {
+      peerKeysArray.push({ peerId: pid, epub: keys.epub, pub: keys.pub });
+    }
+    // Include our own keys
+    peerKeysArray.push({
+      peerId: this.peerId,
+      epub: this.seaKeyPair.epub,
+      pub: this.seaKeyPair.pub,
+    });
+
+    // Broadcast that we're the new host so others know (include room settings and peerKeys)
     const promoteNotifyMsg = {
       id: this.generateId(),
       type: "promote-notify",
@@ -201,6 +215,7 @@ export class EnigmaJS {
       isPublic: this.isPublic ? "true" : "false",
       roomName: this.roomName || "",
       kickedUsers: Array.from(this.kickedUsers).join(","),
+      peerKeys: JSON.stringify(peerKeysArray), // Share keys so others can use them if needed
       timestamp: Date.now(),
     };
     this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
@@ -737,11 +752,14 @@ export class EnigmaJS {
           }
         }
 
+        // Ensure username is always a string (Gun can be picky about types)
+        const hostUsername = String(this.username || "Host");
+
         const welcomeMsg = {
           id: this.generateId(),
           type: "welcome",
           sender: this.peerId,
-          username: this.username,
+          username: hostUsername,
           target: data.sender,
           epub: this.seaKeyPair.epub,
           pub: this.seaKeyPair.pub,
@@ -751,13 +769,15 @@ export class EnigmaJS {
         };
         this.room.get("messages").get(welcomeMsg.id).put(welcomeMsg);
 
-        // Notify existing peers about the new user
+        // Notify existing peers about the new user (include ECDH keys so they can re-key if promoted)
         const userJoinedMsg = {
           id: this.generateId(),
           type: "user-joined",
           sender: this.peerId,
           newUser: data.sender,
           newUsername: displayName,
+          newUserEpub: data.epub, // Include ECDH key for re-keying capability
+          newUserPub: data.pub,
           timestamp: Date.now(),
         };
         this.room.get("messages").get(userJoinedMsg.id).put(userJoinedMsg);
@@ -1084,6 +1104,14 @@ export class EnigmaJS {
         color: this.generateColorFromString(data.newUser),
       });
 
+      // Store ECDH keys (needed for re-keying if we become host)
+      if (data.newUserEpub) {
+        this.peerKeys.set(data.newUser, {
+          epub: data.newUserEpub,
+          pub: data.newUserPub,
+        });
+      }
+
       // Track join order for auto-promote
       if (!this.peerJoinOrder.includes(data.newUser)) {
         this.peerJoinOrder.push(data.newUser);
@@ -1121,6 +1149,27 @@ export class EnigmaJS {
         : [];
       this.kickedUsers = new Set(kickedList);
 
+      // Receive peerKeys from old host (needed for re-keying after kicks)
+      if (data.peerKeys) {
+        try {
+          const keysArray = JSON.parse(data.peerKeys);
+          for (const keyData of keysArray) {
+            if (keyData.peerId && keyData.epub) {
+              this.peerKeys.set(keyData.peerId, {
+                epub: keyData.epub,
+                pub: keyData.pub,
+              });
+            }
+          }
+          this.log(
+            `Received ${keysArray.length} peer keys from old host`,
+            "info",
+          );
+        } catch (e) {
+          this.log(`Failed to parse peer keys: ${e.message}`, "warn");
+        }
+      }
+
       this.updateConnectionInfo();
 
       // Update public listing if public
@@ -1148,6 +1197,27 @@ export class EnigmaJS {
         roomName: data.roomName || null,
         kickedUsers: kickedList,
       };
+    }
+
+    // Also store peerKeys if provided (for potential future auto-promote)
+    if (data.peerKeys) {
+      try {
+        const keysArray = JSON.parse(data.peerKeys);
+        for (const keyData of keysArray) {
+          if (
+            keyData.peerId &&
+            keyData.epub &&
+            keyData.peerId !== this.peerId
+          ) {
+            this.peerKeys.set(keyData.peerId, {
+              epub: keyData.epub,
+              pub: keyData.pub,
+            });
+          }
+        }
+      } catch (e) {
+        // Ignore parse errors for non-host peers
+      }
     }
 
     const newHostInfo = this.peerInfo.get(data.newHost);
@@ -1307,7 +1377,23 @@ export class EnigmaJS {
 
     this.log(`Transferring host to ${username}...`, "info", true);
 
-    // Send promote-notify with all data
+    // Serialize peerKeys for transfer (needed for re-keying after kicks)
+    // Include all peers EXCEPT the new host (they have their own keys)
+    const peerKeysArray = [];
+    for (const [pid, keys] of this.peerKeys.entries()) {
+      if (pid !== peerId) {
+        // Don't send the new host their own keys
+        peerKeysArray.push({ peerId: pid, epub: keys.epub, pub: keys.pub });
+      }
+    }
+    // Also include the old host's (our) own keys so new host can re-key for us
+    peerKeysArray.push({
+      peerId: this.peerId,
+      epub: this.seaKeyPair.epub,
+      pub: this.seaKeyPair.pub,
+    });
+
+    // Send promote-notify with all data including peerKeys
     const promoteNotifyMsg = {
       id: this.generateId(),
       type: "promote-notify",
@@ -1320,6 +1406,7 @@ export class EnigmaJS {
       isPublic: this.isPublic ? "true" : "false",
       roomName: this.roomName || "",
       kickedUsers: Array.from(this.kickedUsers).join(","), // Convert to string for Gun
+      peerKeys: JSON.stringify(peerKeysArray), // Transfer ECDH keys for re-keying
       timestamp: Date.now(),
     };
 

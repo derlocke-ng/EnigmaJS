@@ -1,79 +1,87 @@
 # 🔐 EnigmaJS
 
-**Private Chat That Disappears**
+**Ephemeral • End-to-End Encrypted • Decentralized Chat**
 
-Chat with friends securely. No accounts. No logs. When the room closes, everything's gone.
-
-🌐 **Try it now:** [derlocke-ng.github.io/EnigmaJS](https://derlocke-ng.github.io/EnigmaJS/)
+A private chat application where conversations disappear when the room closes. No servers store your messages. No accounts required.
 
 ---
 
-## What It Does
+## ✨ What Makes EnigmaJS Different
 
-- **🔒 Encrypted** — Messages are scrambled before leaving your device. Only people in the room can read them.
-- **💨 Ephemeral** — When the room closes, messages are gone forever. No history, no logs.
-- **👤 Anonymous** — No accounts, no emails, no phone numbers. Just pick a nickname and go.
-- **🌐 Decentralized** — Uses multiple relay servers. No single company controls your data.
+### 🔥 Truly Ephemeral
 
----
+Messages exist **only during the active session**. When the host closes the room or everyone leaves, the conversation is gone forever. There's no chat history to leak, no database to breach, no logs to subpoena. The encryption keys are generated fresh for each room and discarded when the room ends.
 
-## How To Use
+### 🔐 End-to-End Encrypted
 
-**Host a room:**
-1. Enter a nickname
-2. Click "Host Room"
-3. Share the room code or QR with friends
+Every message is encrypted **before it leaves your device** using [Gun SEA](https://gun.eco/docs/SEA) (Security, Encryption, Authorization). Messages travel through relay servers as encrypted blobs - the relays cannot read them. Only participants who received the room's encryption key can decrypt the conversation.
 
-**Join a room:**
-1. Enter a nickname
-2. Click "Join Room"
-3. Enter the code or scan the QR
+### 🌐 Decentralized Architecture
 
-That's it. Start chatting.
+EnigmaJS uses [Gun.js](https://gun.eco/), a decentralized database protocol. Messages sync through multiple public relay servers - if one goes down, others keep working. There's no single point of failure and no central authority controlling access.
 
----
+### 👤 No Registration Required
 
-## Features
+No accounts. No emails. No phone numbers. No tracking. Just:
 
-- 🔐 Password-protect your room
-- 👥 Set max users (2-256)
-- 🌍 Make room public (shows in room list) or keep it private
-- 👑 Transfer host role to someone else
-- 🚫 Kick unwanted users
-- 📱 Works on mobile & desktop
-- 🔔 Notifications when you get messages
-- 🌙 Dark mode
+1. Create a room → Get a code
+2. Share the code → Friends join
+3. Chat → Messages stay between you
+4. Leave → Everything disappears
 
 ---
 
-## Privacy & Honesty
+## 🛡️ Honest Security Notes
 
-**What EnigmaJS does:**
-- Encrypts all messages end-to-end
-- Creates fresh keys for every room
-- Stores nothing — everything is in memory only
-- Deletes everything when the room closes
+**What we do:**
 
-**What EnigmaJS cannot do:**
-- Protect you if someone's looking at your screen
-- Stop people from taking screenshots
-- Verify who you're really talking to (share room codes through trusted channels!)
-- Guarantee instant delivery (decentralized networks can have delays)
+- Generate unique encryption keys per room using cryptographically secure randomness
+- Encrypt all messages client-side before transmission
+- Use ECDH key exchange (via Gun SEA) to securely share room keys with new joiners
+- Store nothing persistently - all data lives in memory only
 
-**About the relay servers:**
-Your messages pass through Gun.js relays as encrypted blobs — they can't read them. However, relays could potentially see metadata (your IP address, timestamps, message sizes).
+**What we don't do:**
 
-**For better anonymity:**
-- Use a VPN
-- Use Tor Browser
-- Host your own Gun relay
+- We don't protect against compromised devices (if someone's watching your screen, they see your messages)
+- We don't guarantee message delivery (decentralized systems can have sync delays)
+- We don't prevent screenshots or copy/paste
+- We can't verify the identity of who you're talking to (share room codes through trusted channels)
+
+**The relays:**
+Gun.js relay servers see encrypted message blobs pass through. They cannot decrypt them. However, they could theoretically log metadata (timestamps, IP addresses, message sizes). For maximum privacy, you can [run your own Gun relay](https://gun.eco/docs/Installation) or use a VPN or run it over Tor.
 
 ---
 
-## ⚠️ License
+## 🚀 Quick Start
 
-[PolyForm Noncommercial 1.0.0](LICENSE) — Free for personal use. No commercial use.
+```bash
+# Install dependencies
+npm install
+
+# Run development server
+npm run dev
+
+# Build for production
+npm run build
+```
 
 ---
 
-*Made with 🥝 for private conversations*
+## 🔧 How It Works
+
+1. **Host creates room** → Generates room ID + encryption key
+2. **Host shares room ID** → Via QR code, copy/paste, or link
+3. **Guest joins** → Sends join request with their public key
+4. **Host approves** → Encrypts room key with guest's public key, sends welcome
+5. **Secure channel established** → All messages encrypted with shared room key
+6. **Room closes** → Keys discarded, messages become permanently unrecoverable
+
+---
+
+## 📝 License
+
+MIT - Use it, modify it, host it yourself.
+
+---
+
+_Built with Vue 3, Vite, Gun.js, and a commitment to privacy._
