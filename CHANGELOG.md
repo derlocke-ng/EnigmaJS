@@ -1,5 +1,56 @@
 # EnigmaJS Changelog
 
+## [2.1.0] - 2026-01-18 - Security Hardening
+
+### 🔒 Major Security Update
+
+Comprehensive security audit and hardening of the encryption and messaging system.
+
+### Security Improvements
+
+#### Message Authentication (NEW)
+
+- 🔒 **Message Signing** - All messages now cryptographically signed with sender's SEA private key
+- 🔒 **Signature Verification** - Recipients verify signatures using sender's public key
+- 🔒 **Sender Impersonation Prevention** - Attackers cannot forge messages as other users
+- 🔒 **Control Message Protection** - Kick, promote, and rekey messages are now authenticated
+- 🔒 **Deterministic JSON Signing** - Sorted keys ensure consistent signatures across Gun.js transport
+
+#### Host Transfer Security (FIXED)
+
+- 🔒 **Encrypted sharedSecret Transfer** - Was sent in PLAINTEXT, now encrypted via ECDH
+- 🔒 **Encrypted roomPassword Transfer** - Was sent hashed, now encrypted via ECDH
+- 🔒 **Secure Auto-Promote** - Password reset when host leaves (can't securely transfer without old host)
+
+#### Peer Key Management (IMPROVED)
+
+- 🔒 **Peer Keys in Welcome Message** - New joiners receive pub/epub keys of all existing peers
+- 🔒 **peerKeys Transfer on Promotion** - New host receives all peer keys for re-keying capability
+- 🔒 **ECDH Keys in user-joined** - All peers store keys for potential future host duties
+
+#### Room Key Security (IMPROVED)
+
+- 🔒 **Re-keying After Kick** - Generate new room key and distribute via ECDH to remaining peers
+- 🔒 **Key Cleanup on Kick** - Clear sharedSecret, seaKeyPair, peerKeys when kicked
+- 🔒 **Stale Peer Cleanup** - Remove timed-out peers before sending peer list to new joiners
+
+### Technical Changes
+
+- Added `signMessage()` method using `SEA.sign(content, seaKeyPair)`
+- Added `verifySignature()` method using `SEA.verify(signature, pubKey)`
+- Added `getSignableFields()` for deterministic field extraction per message type
+- Strict signature verification for security-critical messages (kick, promote, rekey, etc.)
+- Lenient verification for ping/pong (allow unknown senders for keepalive)
+- Fixed SEA.verify returning parsed object instead of string (stringify for comparison)
+
+### Bug Fixes
+
+- Fixed ghost users appearing in user list after host migration
+- Fixed peerJoinOrder not cleaned up on kick/kick-notify
+- Fixed new joiners unable to verify messages from existing peers (missing keys)
+
+---
+
 ## [2.0.0] - 2026-01-17 - Vue.js Migration
 
 ### 🚀 Major Rewrite

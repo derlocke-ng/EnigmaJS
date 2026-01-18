@@ -108,7 +108,7 @@ defineExpose({ open });
 
       <p class="footer">
         <a
-          href="https://github.com/derlocke-ng/EnigmaJS"
+          href="https://github.com/derlocke-ng/enigmajs"
           target="_blank"
           rel="noopener"
           >Source Code</a

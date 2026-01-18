@@ -72,6 +72,191 @@ export class EnigmaJS {
   }
 
   /**
+   * Sign a message using our SEA keypair
+   * Creates a signature over the message content that can be verified by recipients
+   * @param {Object} msg - Message object to sign
+   * @returns {Promise<Object>} Message with signature added
+   */
+  async signMessage(msg) {
+    if (!this.seaKeyPair) {
+      this.log("Cannot sign: no keypair", "error");
+      return msg;
+    }
+    try {
+      // Sign specific fields in deterministic order (Gun may add/modify other fields)
+      const fieldsToSign = this.getSignableFields(msg);
+      // Use sorted keys for deterministic JSON output
+      const contentToSign = JSON.stringify(
+        fieldsToSign,
+        Object.keys(fieldsToSign).sort(),
+      );
+      const sig = await SEA.sign(contentToSign, this.seaKeyPair);
+      return { ...msg, signature: sig };
+    } catch (e) {
+      this.log(`Signing error: ${e.message}`, "error");
+      return msg;
+    }
+  }
+
+  /**
+   * Extract fields to sign from a message in deterministic order
+   * @param {Object} msg - Message object
+   * @returns {Object} Object with fields to sign
+   */
+  getSignableFields(msg) {
+    // Helper to check if value should be included (not null/undefined)
+    const hasValue = (v) => v !== undefined && v !== null;
+
+    // Core fields present in all messages
+    const fields = {
+      id: msg.id,
+      sender: msg.sender,
+      timestamp: msg.timestamp,
+      type: msg.type,
+    };
+
+    // Add type-specific fields (only if they have a non-null value)
+    switch (msg.type) {
+      case "join":
+        if (hasValue(msg.epub)) fields.epub = msg.epub;
+        if (hasValue(msg.password)) fields.password = msg.password;
+        if (hasValue(msg.pub)) fields.pub = msg.pub;
+        if (hasValue(msg.username)) fields.username = msg.username;
+        break;
+      case "welcome":
+        if (hasValue(msg.encryptedSecret))
+          fields.encryptedSecret = msg.encryptedSecret;
+        if (hasValue(msg.epub)) fields.epub = msg.epub;
+        if (hasValue(msg.peers)) fields.peers = msg.peers;
+        if (hasValue(msg.pub)) fields.pub = msg.pub;
+        if (hasValue(msg.target)) fields.target = msg.target;
+        if (hasValue(msg.username)) fields.username = msg.username;
+        break;
+      case "message":
+        if (hasValue(msg.encrypted)) fields.encrypted = msg.encrypted;
+        break;
+      case "reject":
+        if (hasValue(msg.reason)) fields.reason = msg.reason;
+        if (hasValue(msg.target)) fields.target = msg.target;
+        break;
+      case "kick":
+        if (hasValue(msg.target)) fields.target = msg.target;
+        break;
+      case "kick-notify":
+        if (hasValue(msg.kickedPeer)) fields.kickedPeer = msg.kickedPeer;
+        break;
+      case "user-joined":
+        if (hasValue(msg.newUser)) fields.newUser = msg.newUser;
+        if (hasValue(msg.newUserEpub)) fields.newUserEpub = msg.newUserEpub;
+        if (hasValue(msg.newUserPub)) fields.newUserPub = msg.newUserPub;
+        if (hasValue(msg.newUsername)) fields.newUsername = msg.newUsername;
+        break;
+      case "promote-notify":
+        if (hasValue(msg.encryptedRoomPassword))
+          fields.encryptedRoomPassword = msg.encryptedRoomPassword;
+        if (hasValue(msg.encryptedSharedSecret))
+          fields.encryptedSharedSecret = msg.encryptedSharedSecret;
+        if (hasValue(msg.isPublic)) fields.isPublic = msg.isPublic;
+        if (hasValue(msg.kickedUsers)) fields.kickedUsers = msg.kickedUsers;
+        if (hasValue(msg.maxUsers)) fields.maxUsers = msg.maxUsers;
+        if (hasValue(msg.newHost)) fields.newHost = msg.newHost;
+        if (hasValue(msg.oldHost)) fields.oldHost = msg.oldHost;
+        if (hasValue(msg.peerKeys)) fields.peerKeys = msg.peerKeys;
+        if (hasValue(msg.roomName)) fields.roomName = msg.roomName;
+        break;
+      case "rekey":
+        if (hasValue(msg.encryptedKeys))
+          fields.encryptedKeys = msg.encryptedKeys;
+        break;
+      case "ping":
+        // No additional fields
+        break;
+      case "pong":
+        if (hasValue(msg.pingId)) fields.pingId = msg.pingId;
+        if (hasValue(msg.target)) fields.target = msg.target;
+        break;
+    }
+
+    return fields;
+  }
+
+  /**
+   * Verify message signature using sender's public key
+   * @param {Object} data - Message data with signature
+   * @returns {Promise<boolean>} True if signature is valid
+   */
+  async verifySignature(data) {
+    if (!data.signature) {
+      this.log(
+        `Message ${data.type} from ${data.sender} has no signature`,
+        "warn",
+      );
+      return false;
+    }
+
+    // Extract the same fields that were signed and use sorted keys for deterministic JSON
+    const fieldsToVerify = this.getSignableFields(data);
+    const contentToVerify = JSON.stringify(
+      fieldsToVerify,
+      Object.keys(fieldsToVerify).sort(),
+    );
+
+    // Get sender's signing public key
+    const senderKeys = this.peerKeys.get(data.sender);
+    if (!senderKeys || !senderKeys.pub) {
+      // For join messages, we don't have keys yet - signature provided in message
+      if (data.type === "join" && data.pub) {
+        // Verify using the public key provided in the join message itself
+        try {
+          const verified = await SEA.verify(data.signature, data.pub);
+          // SEA.verify returns the original data - may be parsed as object if it was JSON
+          // So we need to stringify it for comparison
+          const verifiedStr =
+            typeof verified === "object"
+              ? JSON.stringify(verified, Object.keys(verified).sort())
+              : verified;
+          if (verifiedStr === contentToVerify) {
+            return true;
+          }
+          this.log(
+            `Join signature verification failed for ${data.sender}`,
+            "warn",
+          );
+          return false;
+        } catch (e) {
+          this.log(`Join signature verification error: ${e.message}`, "error");
+          return false;
+        }
+      }
+      this.log(
+        `Cannot verify ${data.type}: unknown sender ${data.sender}`,
+        "warn",
+      );
+      return false;
+    }
+
+    try {
+      const verified = await SEA.verify(data.signature, senderKeys.pub);
+      // SEA.verify returns the original data - may be parsed as object if it was JSON
+      const verifiedStr =
+        typeof verified === "object"
+          ? JSON.stringify(verified, Object.keys(verified).sort())
+          : verified;
+      if (verifiedStr === contentToVerify) {
+        return true;
+      }
+      this.log(
+        `Signature verification failed for ${data.type} from ${data.sender}`,
+        "warn",
+      );
+      return false;
+    } catch (e) {
+      this.log(`Signature verification error: ${e.message}`, "error");
+      return false;
+    }
+  }
+
+  /**
    * Hash a password using SHA-256 with optional salt
    * @param {string} password - Plain text password
    * @param {string} salt - Salt (typically roomId)
@@ -165,7 +350,7 @@ export class EnigmaJS {
   /**
    * Self-promote to host (when original host leaves)
    */
-  selfPromote() {
+  async selfPromote() {
     this.log("You are now the host (auto-promoted)", "success", true);
     this.isHost = true;
     this.hostPeerId = this.peerId;
@@ -173,11 +358,16 @@ export class EnigmaJS {
     // Use cached room settings if available (from last promote-notify we observed)
     if (this.cachedRoomSettings) {
       this.maxUsers = this.cachedRoomSettings.maxUsers || 10;
-      this.roomPassword = this.cachedRoomSettings.roomPassword || null;
+      // Note: roomPassword is NOT transferred in auto-promote for security
+      // The new host will need to set a new password if desired
+      this.roomPassword = null;
       this.isPublic = this.cachedRoomSettings.isPublic || false;
       this.roomName = this.cachedRoomSettings.roomName || null;
       this.kickedUsers = new Set(this.cachedRoomSettings.kickedUsers || []);
-      this.log("Restored room settings from cache", "info");
+      this.log(
+        "Restored room settings from cache (password reset for security)",
+        "info",
+      );
     } else {
       // Fallback: no cached settings available
       this.kickedUsers = new Set();
@@ -203,21 +393,24 @@ export class EnigmaJS {
       pub: this.seaKeyPair.pub,
     });
 
-    // Broadcast that we're the new host so others know (include room settings and peerKeys)
-    const promoteNotifyMsg = {
+    // Broadcast that we're the new host so others know
+    // Note: We do NOT send roomPassword or sharedSecret in auto-promote
+    // as we can't encrypt them without the old host
+    let promoteNotifyMsg = {
       id: this.generateId(),
       type: "promote-notify",
       sender: this.peerId,
       oldHost: this.hostPeerId,
       newHost: this.peerId,
       maxUsers: this.maxUsers,
-      roomPassword: this.roomPassword || "",
+      // No roomPassword - can't securely transfer in auto-promote
       isPublic: this.isPublic ? "true" : "false",
       roomName: this.roomName || "",
       kickedUsers: Array.from(this.kickedUsers).join(","),
-      peerKeys: JSON.stringify(peerKeysArray), // Share keys so others can use them if needed
+      peerKeys: JSON.stringify(peerKeysArray), // Public keys - OK to share
       timestamp: Date.now(),
     };
+    promoteNotifyMsg = await this.signMessage(promoteNotifyMsg);
     this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
   }
 
@@ -462,7 +655,7 @@ export class EnigmaJS {
     const hashedPassword = password
       ? await this.hashPassword(password, this.roomId)
       : null;
-    const joinMsg = {
+    let joinMsg = {
       id: this.generateId(),
       type: "join",
       sender: this.peerId,
@@ -472,6 +665,7 @@ export class EnigmaJS {
       password: hashedPassword, // Hashed room password
       timestamp: Date.now(),
     };
+    joinMsg = await this.signMessage(joinMsg);
     this.room.get("messages").get(joinMsg.id).put(joinMsg);
     this.log(
       `Joining room with epub: ${this.seaKeyPair.epub.substring(0, 16)}...`,
@@ -579,7 +773,7 @@ export class EnigmaJS {
     this.room
       .get("messages")
       .map()
-      .on((data, key) => {
+      .on(async (data, key) => {
         if (!data || !data.id || !data.type || !data.sender) return;
 
         // Skip messages from before we joined (Gun replays history)
@@ -602,9 +796,58 @@ export class EnigmaJS {
 
         this.peerLastSeen.set(data.sender, Date.now());
 
+        // Verify signature for message types that require it
+        // join and welcome messages are verified with the key in the message itself
+        // ping/pong are just keepalives - verify if we know the sender, but don't reject if unknown
+        // other messages require the sender to be known (key in peerKeys)
+        const requiresStrictVerification = [
+          "message",
+          "kick",
+          "kick-notify",
+          "user-joined",
+          "promote-notify",
+          "rekey",
+          "reject",
+        ];
+
+        // For ping/pong, only verify if we know the sender (don't reject unknown)
+        if (data.type === "ping" || data.type === "pong") {
+          if (this.peerKeys.has(data.sender)) {
+            const isValid = await this.verifySignature(data);
+            if (!isValid) {
+              this.log(
+                `Ignored ${data.type} from ${data.sender}: invalid signature`,
+                "info",
+              );
+              return;
+            }
+          }
+          // Allow ping/pong from unknown senders (they might be in the room but we haven't got their keys yet)
+        } else if (requiresStrictVerification.includes(data.type)) {
+          const isValid = await this.verifySignature(data);
+          if (!isValid) {
+            this.log(
+              `Rejected ${data.type} from ${data.sender}: invalid signature`,
+              "warn",
+            );
+            return; // Drop message with invalid signature
+          }
+        }
+
         // Route message to appropriate handler
         switch (data.type) {
           case "join":
+            // Verify join signature using the pub key in the message
+            if (data.pub && data.signature) {
+              const isValid = await this.verifySignature(data);
+              if (!isValid) {
+                this.log(
+                  `Rejected JOIN from ${data.sender}: invalid signature`,
+                  "warn",
+                );
+                return;
+              }
+            }
             this.log(
               `Received JOIN from ${data.username || data.sender}`,
               "info",
@@ -612,6 +855,35 @@ export class EnigmaJS {
             Promise.resolve(this.handleJoin(data));
             break;
           case "welcome":
+            // Verify welcome signature using the pub key in the message
+            if (data.pub && data.signature) {
+              try {
+                const fieldsToVerify = this.getSignableFields(data);
+                const contentToVerify = JSON.stringify(
+                  fieldsToVerify,
+                  Object.keys(fieldsToVerify).sort(),
+                );
+                const verified = await SEA.verify(data.signature, data.pub);
+                // SEA.verify returns the original data - may be parsed as object if it was JSON
+                const verifiedStr =
+                  typeof verified === "object"
+                    ? JSON.stringify(verified, Object.keys(verified).sort())
+                    : verified;
+                if (verifiedStr !== contentToVerify) {
+                  this.log(
+                    `Rejected WELCOME from ${data.sender}: invalid signature`,
+                    "warn",
+                  );
+                  return;
+                }
+              } catch (e) {
+                this.log(
+                  `WELCOME signature verification error: ${e.message}`,
+                  "error",
+                );
+                return;
+              }
+            }
             this.log(
               `Received WELCOME from ${data.username || data.sender}`,
               "info",
@@ -637,13 +909,13 @@ export class EnigmaJS {
             this.handleUserJoined(data);
             break;
           case "promote-notify":
-            this.handlePromoteNotify(data);
+            Promise.resolve(this.handlePromoteNotify(data));
             break;
           case "room-destroyed":
             this.handleRoomDestroyed(data);
             break;
           case "ping":
-            this.handlePing(data);
+            Promise.resolve(this.handlePing(data));
             break;
           case "pong":
             this.handlePong(data);
@@ -681,7 +953,7 @@ export class EnigmaJS {
     if (this.peers.size >= this.maxUsers) {
       this.log(`Room full, rejected: ${displayName}`, "warn", true);
       // Send rejection message
-      const rejectMsg = {
+      let rejectMsg = {
         id: this.generateId(),
         type: "reject",
         sender: this.peerId,
@@ -689,6 +961,7 @@ export class EnigmaJS {
         reason: "Room is full",
         timestamp: Date.now(),
       };
+      rejectMsg = await this.signMessage(rejectMsg);
       this.room.get("messages").get(rejectMsg.id).put(rejectMsg);
       return;
     }
@@ -700,7 +973,7 @@ export class EnigmaJS {
       data.password !== this.roomPassword
     ) {
       this.log(`Wrong password from: ${displayName}`, "warn", true);
-      const rejectMsg = {
+      let rejectMsg = {
         id: this.generateId(),
         type: "reject",
         sender: this.peerId,
@@ -708,6 +981,7 @@ export class EnigmaJS {
         reason: "Incorrect password",
         timestamp: Date.now(),
       };
+      rejectMsg = await this.signMessage(rejectMsg);
       this.room.get("messages").get(rejectMsg.id).put(rejectMsg);
       return;
     }
@@ -745,17 +1019,44 @@ export class EnigmaJS {
         const encryptedSecret = await SEA.encrypt(this.sharedSecret, dhKey);
 
         // Build list of existing peers to share with new joiner
+        // Only include peers that have been seen recently (not stale)
+        // Include their pub/epub keys so new joiner can verify their messages
+        const now = Date.now();
+        const staleThreshold = 35000; // 35 seconds (slightly more than heartbeat)
         const existingPeers = [];
         for (const [peerId, info] of this.peerInfo.entries()) {
           if (peerId !== data.sender) {
-            existingPeers.push({ id: peerId, username: info.username });
+            const lastSeen = this.peerLastSeen.get(peerId);
+            // Include peer if they've been seen recently, or if no lastSeen (just joined)
+            if (!lastSeen || now - lastSeen < staleThreshold) {
+              const peerKeys = this.peerKeys.get(peerId);
+              existingPeers.push({
+                id: peerId,
+                username: info.username,
+                epub: peerKeys?.epub,
+                pub: peerKeys?.pub,
+              });
+            } else {
+              // This peer is stale, clean them up
+              this.log(
+                `Removing stale peer ${info.username} from list`,
+                "info",
+              );
+              this.peers.delete(peerId);
+              this.peerInfo.delete(peerId);
+              this.peerKeys.delete(peerId);
+              this.peerLastSeen.delete(peerId);
+              this.peerJoinOrder = this.peerJoinOrder.filter(
+                (id) => id !== peerId,
+              );
+            }
           }
         }
 
         // Ensure username is always a string (Gun can be picky about types)
         const hostUsername = String(this.username || "Host");
 
-        const welcomeMsg = {
+        let welcomeMsg = {
           id: this.generateId(),
           type: "welcome",
           sender: this.peerId,
@@ -767,10 +1068,11 @@ export class EnigmaJS {
           peers: JSON.stringify(existingPeers), // Send as JSON string for Gun
           timestamp: Date.now(),
         };
+        welcomeMsg = await this.signMessage(welcomeMsg);
         this.room.get("messages").get(welcomeMsg.id).put(welcomeMsg);
 
         // Notify existing peers about the new user (include ECDH keys so they can re-key if promoted)
-        const userJoinedMsg = {
+        let userJoinedMsg = {
           id: this.generateId(),
           type: "user-joined",
           sender: this.peerId,
@@ -780,6 +1082,7 @@ export class EnigmaJS {
           newUserPub: data.pub,
           timestamp: Date.now(),
         };
+        userJoinedMsg = await this.signMessage(userJoinedMsg);
         this.room.get("messages").get(userJoinedMsg.id).put(userJoinedMsg);
 
         this.connected = true;
@@ -824,6 +1127,10 @@ export class EnigmaJS {
             username: peer.username,
             color: this.generateColorFromString(peer.id),
           });
+          // Store peer's SEA keys for signature verification
+          if (peer.epub && peer.pub) {
+            this.peerKeys.set(peer.id, { epub: peer.epub, pub: peer.pub });
+          }
           // Add to join order (they joined before us)
           this.peerJoinOrder.push(peer.id);
         }
@@ -918,8 +1225,8 @@ export class EnigmaJS {
    * Handle incoming ping message
    * @param {Object} data - Ping message data
    */
-  handlePing(data) {
-    const pongMsg = {
+  async handlePing(data) {
+    let pongMsg = {
       id: this.generateId(),
       type: "pong",
       sender: this.peerId,
@@ -927,6 +1234,7 @@ export class EnigmaJS {
       pingId: data.id,
       timestamp: Date.now(),
     };
+    pongMsg = await this.signMessage(pongMsg);
     this.room.get("messages").get(pongMsg.id).put(pongMsg);
   }
 
@@ -1077,6 +1385,10 @@ export class EnigmaJS {
       this.peerInfo.delete(data.kickedPeer);
       this.peerKeys.delete(data.kickedPeer);
       this.peerLastSeen.delete(data.kickedPeer);
+      // Also remove from join order
+      this.peerJoinOrder = this.peerJoinOrder.filter(
+        (id) => id !== data.kickedPeer,
+      );
       this.updateConnectionInfo();
     }
   }
@@ -1125,7 +1437,7 @@ export class EnigmaJS {
    * Handle host promotion notification
    * @param {Object} data - Promotion notification data
    */
-  handlePromoteNotify(data) {
+  async handlePromoteNotify(data) {
     // Update who the host is
     this.hostPeerId = data.newHost;
 
@@ -1135,12 +1447,44 @@ export class EnigmaJS {
 
       // Set host state
       this.isHost = true;
-      // Only take sharedSecret if provided (manual promote has it, auto-promote doesn't)
-      if (data.sharedSecret) {
-        this.sharedSecret = data.sharedSecret;
+
+      // Decrypt secrets from old host using ECDH
+      const oldHostKeys = this.peerKeys.get(data.sender);
+      if (oldHostKeys && oldHostKeys.epub) {
+        try {
+          const dhKey = await SEA.secret(oldHostKeys.epub, this.seaKeyPair);
+
+          // Decrypt sharedSecret (manual promote sends encrypted, auto-promote doesn't)
+          if (data.encryptedSharedSecret) {
+            const decryptedSecret = await SEA.decrypt(
+              data.encryptedSharedSecret,
+              dhKey,
+            );
+            if (decryptedSecret) {
+              this.sharedSecret = decryptedSecret;
+              this.log("Received encrypted room key from old host", "info");
+            }
+          }
+
+          // Decrypt roomPassword if provided
+          if (data.encryptedRoomPassword) {
+            const decryptedPassword = await SEA.decrypt(
+              data.encryptedRoomPassword,
+              dhKey,
+            );
+            if (decryptedPassword) {
+              this.roomPassword = decryptedPassword;
+            }
+          }
+        } catch (e) {
+          this.log(
+            `Failed to decrypt secrets from old host: ${e.message}`,
+            "warn",
+          );
+        }
       }
+
       this.maxUsers = data.maxUsers || 10;
-      this.roomPassword = data.roomPassword || null;
       this.isPublic = data.isPublic === "true";
       this.roomName = data.roomName || null;
       // Parse kickedUsers from comma-separated string
@@ -1186,13 +1530,14 @@ export class EnigmaJS {
 
     // All other clients get notified about host change
     // Cache room settings in case we need to auto-promote later
-    if (data.maxUsers || data.roomPassword || data.kickedUsers) {
+    // Note: roomPassword is NOT cached for security reasons
+    if (data.maxUsers || data.kickedUsers) {
       const kickedList = data.kickedUsers
         ? data.kickedUsers.split(",").filter((x) => x)
         : [];
       this.cachedRoomSettings = {
         maxUsers: data.maxUsers || 10,
-        roomPassword: data.roomPassword || null,
+        // roomPassword intentionally NOT stored - security risk
         isPublic: data.isPublic === "true",
         roomName: data.roomName || null,
         kickedUsers: kickedList,
@@ -1239,23 +1584,25 @@ export class EnigmaJS {
     this.kickedUsers.add(peerId);
 
     // Send kick message to the kicked user
-    const kickMsg = {
+    let kickMsg = {
       id: this.generateId(),
       type: "kick",
       sender: this.peerId,
       target: peerId,
       timestamp: Date.now(),
     };
+    kickMsg = await this.signMessage(kickMsg);
     this.room.get("messages").get(kickMsg.id).put(kickMsg);
 
     // Notify all other peers about the kick
-    const kickNotifyMsg = {
+    let kickNotifyMsg = {
       id: this.generateId(),
       type: "kick-notify",
       sender: this.peerId,
       kickedPeer: peerId,
       timestamp: Date.now(),
     };
+    kickNotifyMsg = await this.signMessage(kickNotifyMsg);
     this.room.get("messages").get(kickNotifyMsg.id).put(kickNotifyMsg);
 
     // Remove from local state
@@ -1263,6 +1610,8 @@ export class EnigmaJS {
     this.peerInfo.delete(peerId);
     this.peerKeys.delete(peerId);
     this.peerLastSeen.delete(peerId);
+    // Also remove from join order
+    this.peerJoinOrder = this.peerJoinOrder.filter((id) => id !== peerId);
 
     this.log(`Kicked ${username} from room`, "warn", true);
 
@@ -1307,13 +1656,14 @@ export class EnigmaJS {
     }
 
     // Broadcast rekey message
-    const rekeyMsg = {
+    let rekeyMsg = {
       id: this.generateId(),
       type: "rekey",
       sender: this.peerId,
       encryptedKeys: JSON.stringify(encryptedKeys),
       timestamp: Date.now(),
     };
+    rekeyMsg = await this.signMessage(rekeyMsg);
     this.room.get("messages").get(rekeyMsg.id).put(rekeyMsg);
 
     // Update our own key
@@ -1366,7 +1716,7 @@ export class EnigmaJS {
    * Promote another user to host (host only)
    * @param {string} peerId - ID of peer to promote
    */
-  promoteToHost(peerId) {
+  async promoteToHost(peerId) {
     if (!this.isHost) {
       this.log("Cannot promote: not host", "error", true);
       return;
@@ -1376,6 +1726,26 @@ export class EnigmaJS {
     const username = userInfo ? userInfo.username : "User";
 
     this.log(`Transferring host to ${username}...`, "info", true);
+
+    // Get new host's public key for encryption
+    const newHostKeys = this.peerKeys.get(peerId);
+    if (!newHostKeys || !newHostKeys.epub) {
+      this.log(
+        "Cannot promote: missing new host's encryption key",
+        "error",
+        true,
+      );
+      return;
+    }
+
+    // Encrypt sharedSecret for the new host using ECDH
+    const dhKey = await SEA.secret(newHostKeys.epub, this.seaKeyPair);
+    const encryptedSharedSecret = await SEA.encrypt(this.sharedSecret, dhKey);
+
+    // Encrypt roomPassword for the new host (if set)
+    const encryptedRoomPassword = this.roomPassword
+      ? await SEA.encrypt(this.roomPassword, dhKey)
+      : null;
 
     // Serialize peerKeys for transfer (needed for re-keying after kicks)
     // Include all peers EXCEPT the new host (they have their own keys)
@@ -1393,22 +1763,23 @@ export class EnigmaJS {
       pub: this.seaKeyPair.pub,
     });
 
-    // Send promote-notify with all data including peerKeys
-    const promoteNotifyMsg = {
+    // Send promote-notify with ENCRYPTED sensitive data
+    let promoteNotifyMsg = {
       id: this.generateId(),
       type: "promote-notify",
       sender: this.peerId,
       oldHost: this.peerId,
       newHost: peerId,
-      sharedSecret: this.sharedSecret,
+      encryptedSharedSecret: encryptedSharedSecret, // ENCRYPTED for new host only
+      encryptedRoomPassword: encryptedRoomPassword, // ENCRYPTED for new host only
       maxUsers: this.maxUsers,
-      roomPassword: this.roomPassword || "",
       isPublic: this.isPublic ? "true" : "false",
       roomName: this.roomName || "",
-      kickedUsers: Array.from(this.kickedUsers).join(","), // Convert to string for Gun
-      peerKeys: JSON.stringify(peerKeysArray), // Transfer ECDH keys for re-keying
+      kickedUsers: Array.from(this.kickedUsers).join(","), // Not sensitive
+      peerKeys: JSON.stringify(peerKeysArray), // Public keys - OK to share
       timestamp: Date.now(),
     };
+    promoteNotifyMsg = await this.signMessage(promoteNotifyMsg);
 
     this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
 
@@ -1559,15 +1930,16 @@ export class EnigmaJS {
   /**
    * Send a ping message
    */
-  sendPing() {
+  async sendPing() {
     if (!this.room) return;
     const pingId = this.generateId();
-    const pingMsg = {
+    let pingMsg = {
       id: pingId,
       type: "ping",
       sender: this.peerId,
       timestamp: Date.now(),
     };
+    pingMsg = await this.signMessage(pingMsg);
     // Track this ping for latency measurement
     this.pendingPings.set(pingId, Date.now());
     // Clean up old pending pings (> 10 seconds old)
@@ -1600,13 +1972,14 @@ export class EnigmaJS {
       const encrypted = await SEA.encrypt(text, this.sharedSecret);
       this.log(`Message encrypted (length: ${encrypted?.length || 0})`, "info");
 
-      const msg = {
+      let msg = {
         id: this.generateId(),
         type: "message",
         sender: this.peerId,
         encrypted: encrypted,
         timestamp: Date.now(),
       };
+      msg = await this.signMessage(msg);
 
       this.room.get("messages").get(msg.id).put(msg);
       this.log("Message sent to Gun network", "info");

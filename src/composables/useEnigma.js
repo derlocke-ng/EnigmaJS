@@ -305,9 +305,9 @@ export function useEnigma() {
   /**
    * Promote a user to host (host only)
    */
-  function promoteUser(peerId) {
+  async function promoteUser(peerId) {
     if (!enigmaInstance.value?.isHost) return;
-    enigmaInstance.value.promoteToHost(peerId);
+    await enigmaInstance.value.promoteToHost(peerId);
     // Old host loses host status
     store.isHost = false;
     store.addLog({
