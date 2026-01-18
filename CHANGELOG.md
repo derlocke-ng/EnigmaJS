@@ -1,5 +1,13 @@
 # EnigmaJS Changelog
 
+## [2.1.1] - 2026-01-18 - Race Condition Fix
+
+### Bug Fixes
+
+- 🐛 **Fixed user-joined verification race condition** - `user-joined` messages could arrive before `welcome` was processed, causing "unknown sender" errors. Now uses lenient verification (verify if known, allow if unknown) like ping/pong messages.
+
+---
+
 ## [2.1.0] - 2026-01-18 - Security Hardening
 
 ### 🔒 Major Security Update
