@@ -1,5 +1,20 @@
 # EnigmaJS Changelog
 
+## [2.2.3] - 2026-01-18 - Heir Secrets Retry & UI Improvements
+
+### Bug Fixes
+
+- 🐛 **Heir-secrets retry mechanism** - `heir-secrets` messages now retry up to 5 times (300ms interval) when the host isn't known yet. Fixes race condition where secrets arrive before welcome message due to Gun.js message ordering.
+- 🐛 **Deferred verification for heir-secrets** - Moved `heir-secrets` to skipVerification list, then performs mandatory signature verification inside handler after retry. Ensures secrets are always verified but tolerates arrival order issues.
+
+### UI Improvements
+
+- ✨ **Collapsible Share Room panel** - Share Room section is now collapsed by default with a toggle button, keeping the interface cleaner
+- 📱 **Mobile CSS improvements** - Setting rows (Max Users, Password) now stack vertically on small screens (≤480px) for better usability
+- 🎯 **Auto-open Share Room for hosts** - When hosting a room, the Share Room panel automatically opens so hosts can easily share the room link/QR
+
+---
+
 ## [2.2.2] - 2026-01-18 - Skip Verification for Non-Critical Messages
 
 ### Bug Fixes

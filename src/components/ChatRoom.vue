@@ -24,6 +24,7 @@ const fileInput = ref(null);
 const isScanning = ref(false);
 
 // Room settings (host only)
+const showShareRoom = ref(false);
 const showRoomSettings = ref(false);
 const hostPassword = ref("");
 const hostMaxUsers = ref(10);
@@ -52,14 +53,15 @@ onUnmounted(() => {
 });
 
 async function initHost() {
-  const roomId = await enigma.initHost();
-
-  // Generate QR code after DOM update
-  await nextTick();
-  setTimeout(() => {
-    enigma.generateQR("qrcode", roomId);
-    qrCodeReady.value = true;
-  }, 100);
+  await enigma.initHost();
+  // Open share room panel by default for hosts
+  showShareRoom.value = true;
+  // Generate QR code after panel opens
+  nextTick(() => {
+    setTimeout(() => {
+      enigma.generateQR("qrcode", store.roomId);
+    }, 50);
+  });
 }
 
 async function connectManual() {
@@ -163,6 +165,18 @@ function handleQRScanned(roomId) {
 }
 
 // Room settings functions (host only)
+function toggleShareRoom() {
+  showShareRoom.value = !showShareRoom.value;
+  // Generate QR code when panel opens
+  if (showShareRoom.value && store.roomId) {
+    nextTick(() => {
+      setTimeout(() => {
+        enigma.generateQR("qrcode", store.roomId);
+      }, 50);
+    });
+  }
+}
+
 function toggleRoomSettings() {
   showRoomSettings.value = !showRoomSettings.value;
   if (showRoomSettings.value) {
@@ -220,18 +234,29 @@ const showHostControls = computed(() => store.isHost && store.roomId);
 
     <!-- Host Controls: Show Room ID & QR (shown to whoever is host) -->
     <div v-if="showHostControls" class="room-info">
-      <p>Your Room ID:</p>
-      <div class="peer-id">{{ store.roomId }}</div>
-      <div class="copy-buttons">
-        <button class="btn-secondary" @click="copyRoomId">
-          {{ copiedId ? "✓ Copied!" : "📋 Copy ID" }}
-        </button>
-        <button class="btn-secondary" @click="copyShareLink">
-          {{ copiedLink ? "✓ Copied!" : "🔗 Copy Link" }}
-        </button>
+      <!-- Share Room Toggle -->
+      <button
+        class="btn-secondary full-width room-settings-toggle"
+        @click="toggleShareRoom"
+      >
+        📤 Share Room {{ showShareRoom ? "▲" : "▼" }}
+      </button>
+
+      <!-- Share Room Panel -->
+      <div v-if="showShareRoom" class="share-room-panel">
+        <p>Your Room ID:</p>
+        <div class="peer-id">{{ store.roomId }}</div>
+        <div class="copy-buttons">
+          <button class="btn-secondary" @click="copyRoomId">
+            {{ copiedId ? "✓ Copied!" : "📋 Copy ID" }}
+          </button>
+          <button class="btn-secondary" @click="copyShareLink">
+            {{ copiedLink ? "✓ Copied!" : "🔗 Copy Link" }}
+          </button>
+        </div>
+        <p class="qr-hint">Scan this QR code to connect:</p>
+        <div id="qrcode" class="qr-container"></div>
       </div>
-      <p class="qr-hint">Scan this QR code to connect:</p>
-      <div id="qrcode" class="qr-container"></div>
 
       <!-- Room Settings Toggle -->
       <button
@@ -552,6 +577,15 @@ h2 {
   margin-top: 15px;
 }
 
+.share-room-panel {
+  margin-top: 15px;
+  padding: 15px;
+  background: var(--input-bg);
+  border-radius: 12px;
+  border: 1px solid var(--input-border);
+  text-align: center;
+}
+
 .room-settings {
   margin-top: 15px;
   padding: 15px;
@@ -562,6 +596,7 @@ h2 {
 
 .setting-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-bottom: 12px;
@@ -582,6 +617,27 @@ h2 {
   font-weight: 600;
   font-size: 14px;
   min-width: 140px;
+}
+
+/* Mobile: stack setting rows vertically */
+@media (max-width: 480px) {
+  .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .setting-row label {
+    min-width: auto;
+    margin-bottom: 5px;
+  }
+
+  .setting-input {
+    width: 100%;
+  }
+
+  .setting-input-small {
+    max-width: 100%;
+  }
 }
 
 .setting-input {
