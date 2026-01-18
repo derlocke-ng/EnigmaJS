@@ -35,6 +35,9 @@ const hostRoomName = ref("");
 const copiedLink = ref(false);
 const copiedId = ref(false);
 
+// User list sync interval for non-hosts
+let userListSyncInterval = null;
+
 onMounted(async () => {
   if (store.currentMode === "host") {
     await initHost();
@@ -50,7 +53,33 @@ onUnmounted(() => {
   if (isScanning.value && videoElement.value) {
     enigma.stopQRScanner(videoElement.value);
   }
+  // Clean up user list sync interval
+  if (userListSyncInterval) {
+    clearInterval(userListSyncInterval);
+    userListSyncInterval = null;
+  }
 });
+
+// Start periodic user list sync when connected as non-host
+watch(
+  () => store.isConnected,
+  (isConnected) => {
+    if (isConnected && !store.isHost) {
+      // Start periodic sync every 30 seconds
+      userListSyncInterval = setInterval(() => {
+        if (store.isConnected && !store.isHost) {
+          enigma.requestUserListSync();
+        }
+      }, 30000);
+    } else {
+      // Clear interval when disconnected or became host
+      if (userListSyncInterval) {
+        clearInterval(userListSyncInterval);
+        userListSyncInterval = null;
+      }
+    }
+  },
+);
 
 async function initHost() {
   await enigma.initHost();
@@ -214,6 +243,12 @@ function handleDestroyRoom() {
     )
   ) {
     enigma.destroyRoom();
+  }
+}
+
+function handleLeaveRoom() {
+  if (confirm("Are you sure you want to leave this room?")) {
+    enigma.leaveRoom();
   }
 }
 
@@ -390,6 +425,13 @@ const showHostControls = computed(() => store.isHost && store.roomId);
 
     <!-- User List (shown when connected) -->
     <UserList v-if="store.isConnected" />
+
+    <!-- Leave Room button (non-host only, when connected) -->
+    <div v-if="store.isConnected && !store.isHost" class="leave-room-section">
+      <button class="btn-secondary btn-leave" @click="handleLeaveRoom">
+        🚪 Leave Room
+      </button>
+    </div>
 
     <!-- Chat Area (shown when connected) -->
     <ChatMessages v-if="store.isConnected" />
@@ -738,5 +780,20 @@ h2 {
   50% {
     opacity: 0.5;
   }
+}
+
+.leave-room-section {
+  margin-top: 15px;
+  text-align: center;
+}
+
+.btn-leave {
+  background: var(--btn-secondary-bg);
+  color: #ff6b6b;
+  border: 2px solid #ff6b6b;
+}
+
+.btn-leave:hover {
+  background: rgba(255, 107, 107, 0.15);
 }
 </style>

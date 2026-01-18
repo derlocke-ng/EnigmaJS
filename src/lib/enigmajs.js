@@ -880,6 +880,7 @@ export class EnigmaJS {
           "pong",
           "user-joined",
           "heir-secrets",
+          "request-user-list",
         ];
         if (skipVerification.includes(data.type)) {
           // Allow without verification
@@ -985,6 +986,15 @@ export class EnigmaJS {
             break;
           case "heir-secrets":
             Promise.resolve(this.handleHeirSecrets(data));
+            break;
+          case "user-left":
+            this.handleUserLeft(data);
+            break;
+          case "request-user-list":
+            Promise.resolve(this.handleRequestUserList(data));
+            break;
+          case "user-list-sync":
+            Promise.resolve(this.handleUserListSync(data));
             break;
         }
       });
@@ -1457,6 +1467,138 @@ export class EnigmaJS {
         (id) => id !== data.kickedPeer,
       );
       this.updateConnectionInfo();
+    }
+  }
+
+  /**
+   * Handle user-left notification (graceful disconnect)
+   * @param {Object} data - User left notification data
+   */
+  handleUserLeft(data) {
+    // Ignore own messages
+    if (data.sender === this.peerId) return;
+
+    // Remove the user from our peer list
+    if (this.peers.has(data.sender)) {
+      const userInfo = this.peerInfo.get(data.sender);
+      const username = userInfo ? userInfo.username : "User";
+      this.log(`${username} left the room`, "info", true);
+
+      const wasHost = data.sender === this.hostPeerId;
+
+      this.peers.delete(data.sender);
+      this.peerInfo.delete(data.sender);
+      this.peerKeys.delete(data.sender);
+      this.peerLastSeen.delete(data.sender);
+      this.peerJoinOrder = this.peerJoinOrder.filter(
+        (id) => id !== data.sender,
+      );
+
+      // If host left, trigger auto-promote
+      if (wasHost && !this.isHost) {
+        this.handleHostLeft();
+      }
+
+      // If we're host, update heir secrets
+      if (this.isHost) {
+        this.sendHeirSecrets();
+      }
+
+      this.updateConnectionInfo();
+    }
+  }
+
+  /**
+   * Handle request for user list sync (host only)
+   * @param {Object} data - Request data
+   */
+  async handleRequestUserList(data) {
+    // Only host responds to user list requests
+    if (!this.isHost) return;
+
+    // Ignore own messages
+    if (data.sender === this.peerId) return;
+
+    // Build current user list
+    const userList = [];
+    for (const [peerId, info] of this.peerInfo.entries()) {
+      const keys = this.peerKeys.get(peerId);
+      userList.push({
+        id: peerId,
+        username: info.username,
+        epub: keys?.epub,
+        pub: keys?.pub,
+      });
+    }
+
+    // Send user list sync to the requester
+    let syncMsg = {
+      id: this.generateId(),
+      type: "user-list-sync",
+      sender: this.peerId,
+      target: data.sender,
+      users: JSON.stringify(userList),
+      timestamp: Date.now(),
+    };
+    syncMsg = await this.signMessage(syncMsg);
+    this.room.get("messages").get(syncMsg.id).put(syncMsg);
+  }
+
+  /**
+   * Handle user list sync from host
+   * @param {Object} data - Sync data with user list
+   */
+  async handleUserListSync(data) {
+    // Only process if targeted at us
+    if (data.target !== this.peerId) return;
+
+    // Only process from host
+    if (data.sender !== this.hostPeerId) return;
+
+    try {
+      const userList = JSON.parse(data.users || "[]");
+
+      // Build set of current peer IDs from host
+      const hostPeerIds = new Set(userList.map((u) => u.id));
+
+      // Remove peers that host doesn't have (stale users)
+      for (const peerId of this.peers) {
+        if (peerId !== this.hostPeerId && !hostPeerIds.has(peerId)) {
+          const userInfo = this.peerInfo.get(peerId);
+          const username = userInfo ? userInfo.username : "User";
+          this.log(`Removing stale user: ${username}`, "info");
+          this.peers.delete(peerId);
+          this.peerInfo.delete(peerId);
+          this.peerKeys.delete(peerId);
+          this.peerLastSeen.delete(peerId);
+          this.peerJoinOrder = this.peerJoinOrder.filter((id) => id !== peerId);
+        }
+      }
+
+      // Add peers that host has but we don't
+      for (const user of userList) {
+        if (user.id !== this.peerId && !this.peers.has(user.id)) {
+          this.peers.add(user.id);
+          this.peerInfo.set(user.id, {
+            username: user.username,
+            color: this.generateColorFromString(user.id),
+          });
+          if (user.epub) {
+            this.peerKeys.set(user.id, {
+              epub: user.epub,
+              pub: user.pub,
+            });
+          }
+          if (!this.peerJoinOrder.includes(user.id)) {
+            this.peerJoinOrder.push(user.id);
+          }
+        }
+      }
+
+      this.updateConnectionInfo();
+      this.log("User list synced with host", "info");
+    } catch (err) {
+      this.log(`Failed to sync user list: ${err.message}`, "error");
     }
   }
 
@@ -2083,6 +2225,37 @@ export class EnigmaJS {
       }
     }
     this.room.get("messages").get(pingMsg.id).put(pingMsg);
+  }
+
+  /**
+   * Send user-left message (graceful disconnect)
+   */
+  async sendUserLeft() {
+    if (!this.room) return;
+    let leftMsg = {
+      id: this.generateId(),
+      type: "user-left",
+      sender: this.peerId,
+      username: this.username,
+      timestamp: Date.now(),
+    };
+    leftMsg = await this.signMessage(leftMsg);
+    this.room.get("messages").get(leftMsg.id).put(leftMsg);
+  }
+
+  /**
+   * Request user list sync from host
+   */
+  async requestUserListSync() {
+    if (!this.room || this.isHost) return;
+    let requestMsg = {
+      id: this.generateId(),
+      type: "request-user-list",
+      sender: this.peerId,
+      timestamp: Date.now(),
+    };
+    requestMsg = await this.signMessage(requestMsg);
+    this.room.get("messages").get(requestMsg.id).put(requestMsg);
   }
 
   /**

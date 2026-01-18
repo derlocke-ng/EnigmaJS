@@ -1,5 +1,21 @@
 # EnigmaJS Changelog
 
+## [2.3.0] - 2026-01-18 - Leave Room & User List Sync
+
+### ✨ New Features
+
+- **Leave Room button** - Non-host users can now actively leave a room with a dedicated button, sending a `user-left` message to notify others immediately
+- **Periodic user list sync** - Clients request updated user list from host every 30 seconds, cleaning up stale users that may have disconnected without notice
+
+### Technical Details
+
+- New `user-left` message type for graceful disconnects
+- New `request-user-list` and `user-list-sync` message types for periodic sync
+- `leaveRoom()` and `requestUserListSync()` added to useEnigma composable
+- Automatic cleanup of users not in host's authoritative list
+
+---
+
 ## [2.2.3] - 2026-01-18 - Heir Secrets Retry & UI Improvements
 
 ### Bug Fixes

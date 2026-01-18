@@ -228,6 +228,32 @@ export function useEnigma() {
   }
 
   /**
+   * Leave the room gracefully (non-host only)
+   */
+  async function leaveRoom() {
+    if (!enigmaInstance.value) return;
+
+    // Send user-left message before disconnecting
+    await enigmaInstance.value.sendUserLeft();
+
+    // Small delay to ensure message is sent
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Reset local state
+    store.addLog({ message: "You left the room", type: "info" });
+    store.reset();
+    enigmaInstance.value = null;
+  }
+
+  /**
+   * Request user list sync from host (for non-hosts)
+   */
+  function requestUserListSync() {
+    if (!enigmaInstance.value || enigmaInstance.value.isHost) return;
+    enigmaInstance.value.requestUserListSync();
+  }
+
+  /**
    * Send a chat message
    */
   function sendMessage(text) {
@@ -578,5 +604,7 @@ export function useEnigma() {
     getRoomVisibility,
     getPublicRooms,
     destroyRoom,
+    leaveRoom,
+    requestUserListSync,
   };
 }
