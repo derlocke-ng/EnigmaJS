@@ -873,20 +873,12 @@ export class EnigmaJS {
           "heir-secrets",
         ];
 
-        // For ping/pong/user-joined, only verify if we know the sender (don't reject unknown)
-        const lenientVerification = ["ping", "pong", "user-joined"];
-        if (lenientVerification.includes(data.type)) {
-          if (this.peerKeys.has(data.sender)) {
-            const isValid = await this.verifySignature(data);
-            if (!isValid) {
-              this.log(
-                `Ignored ${data.type} from ${data.sender}: invalid signature`,
-                "info",
-              );
-              return;
-            }
-          }
-          // Allow from unknown senders (they might be in the room but we haven't got their keys yet)
+        // For ping/pong/user-joined, skip verification entirely
+        // These are non-critical messages (UI updates only, no security impact)
+        // user-joined can arrive before welcome due to Gun.js message ordering
+        const skipVerification = ["ping", "pong", "user-joined"];
+        if (skipVerification.includes(data.type)) {
+          // Allow without verification
         } else if (requiresStrictVerification.includes(data.type)) {
           const isValid = await this.verifySignature(data);
           if (!isValid) {

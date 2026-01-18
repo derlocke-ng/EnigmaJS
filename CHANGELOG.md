@@ -1,5 +1,13 @@
 # EnigmaJS Changelog
 
+## [2.2.2] - 2026-01-18 - Skip Verification for Non-Critical Messages
+
+### Bug Fixes
+
+- 🐛 **Skip verification for ping/pong/user-joined** - These non-critical messages (UI updates only) now skip signature verification entirely. Fixes race condition where user-joined arrives before welcome is processed.
+
+---
+
 ## [2.2.1] - 2026-01-18 - Heir Secrets Race Fix
 
 ### Bug Fixes
