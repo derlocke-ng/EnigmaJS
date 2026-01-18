@@ -55,6 +55,8 @@ export class EnigmaJS {
 
     // Cached room settings (for auto-promote when host leaves unexpectedly)
     this.cachedRoomSettings = null;
+    // Cached secrets from host (for heir to use if host leaves unexpectedly)
+    this.cachedHeirSecrets = null;
 
     // Network quality tracking
     this.pendingPings = new Map(); // Track ping timestamps
@@ -167,6 +169,13 @@ export class EnigmaJS {
       case "rekey":
         if (hasValue(msg.encryptedKeys))
           fields.encryptedKeys = msg.encryptedKeys;
+        break;
+      case "heir-secrets":
+        if (hasValue(msg.target)) fields.target = msg.target;
+        if (hasValue(msg.encryptedRoomPassword))
+          fields.encryptedRoomPassword = msg.encryptedRoomPassword;
+        if (hasValue(msg.encryptedSharedSecret))
+          fields.encryptedSharedSecret = msg.encryptedSharedSecret;
         break;
       case "ping":
         // No additional fields
@@ -358,20 +367,29 @@ export class EnigmaJS {
     // Use cached room settings if available (from last promote-notify we observed)
     if (this.cachedRoomSettings) {
       this.maxUsers = this.cachedRoomSettings.maxUsers || 10;
-      // Note: roomPassword is NOT transferred in auto-promote for security
-      // The new host will need to set a new password if desired
-      this.roomPassword = null;
       this.isPublic = this.cachedRoomSettings.isPublic || false;
       this.roomName = this.cachedRoomSettings.roomName || null;
       this.kickedUsers = new Set(this.cachedRoomSettings.kickedUsers || []);
-      this.log(
-        "Restored room settings from cache (password reset for security)",
-        "info",
-      );
     } else {
       // Fallback: no cached settings available
       this.kickedUsers = new Set();
+    }
+
+    // Use cached heir secrets if available (sent by old host before they left)
+    if (this.cachedHeirSecrets) {
+      if (this.cachedHeirSecrets.sharedSecret) {
+        this.sharedSecret = this.cachedHeirSecrets.sharedSecret;
+        this.log("Restored room key from heir secrets", "info");
+      }
+      if (this.cachedHeirSecrets.roomPassword) {
+        this.roomPassword = this.cachedHeirSecrets.roomPassword;
+        this.log("Restored room password from heir secrets", "info");
+      }
+      this.cachedHeirSecrets = null; // Clear after use
+    } else {
+      // No heir secrets - password cannot be recovered
       this.roomPassword = null;
+      this.log("No heir secrets available - room password reset", "info");
     }
 
     this.updateConnectionInfo();
@@ -412,6 +430,50 @@ export class EnigmaJS {
     };
     promoteNotifyMsg = await this.signMessage(promoteNotifyMsg);
     this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
+
+    // Send heir secrets to the new potential heir (for if we disconnect unexpectedly)
+    await this.sendHeirSecrets();
+  }
+
+  /**
+   * Send encrypted heir secrets to the next-in-line peer
+   * Called when host changes or when peer list changes
+   */
+  async sendHeirSecrets() {
+    if (!this.isHost) return;
+
+    // Determine heir: lexicographically smallest peer ID (excluding self)
+    const candidates = [...this.peers].sort();
+    if (candidates.length === 0) return; // No heir
+
+    const heirId = candidates[0];
+    const heirKeys = this.peerKeys.get(heirId);
+    if (!heirKeys || !heirKeys.epub) {
+      this.log(`Cannot send heir-secrets: missing keys for ${heirId}`, "warn");
+      return;
+    }
+
+    // Encrypt secrets using ECDH
+    const dhKey = await SEA.secret(heirKeys.epub, this.seaKeyPair);
+    const encryptedSharedSecret = this.sharedSecret
+      ? await SEA.encrypt(this.sharedSecret, dhKey)
+      : null;
+    const encryptedRoomPassword = this.roomPassword
+      ? await SEA.encrypt(this.roomPassword, dhKey)
+      : null;
+
+    let heirMsg = {
+      id: this.generateId(),
+      type: "heir-secrets",
+      sender: this.peerId,
+      target: heirId,
+      encryptedSharedSecret,
+      encryptedRoomPassword,
+      timestamp: Date.now(),
+    };
+    heirMsg = await this.signMessage(heirMsg);
+    this.room.get("messages").get(heirMsg.id).put(heirMsg);
+    this.log(`Sent heir secrets to ${heirId}`, "info");
   }
 
   /**
@@ -808,6 +870,7 @@ export class EnigmaJS {
           "promote-notify",
           "rekey",
           "reject",
+          "heir-secrets",
         ];
 
         // For ping/pong/user-joined, only verify if we know the sender (don't reject unknown)
@@ -923,6 +986,9 @@ export class EnigmaJS {
             break;
           case "rekey":
             Promise.resolve(this.handleRekey(data));
+            break;
+          case "heir-secrets":
+            Promise.resolve(this.handleHeirSecrets(data));
             break;
         }
       });
@@ -1085,6 +1151,9 @@ export class EnigmaJS {
         };
         userJoinedMsg = await this.signMessage(userJoinedMsg);
         this.room.get("messages").get(userJoinedMsg.id).put(userJoinedMsg);
+
+        // Update heir secrets since peer list changed
+        await this.sendHeirSecrets();
 
         this.connected = true;
         this.setStatus("connected");
@@ -1364,6 +1433,7 @@ export class EnigmaJS {
     this.peers.clear();
     this.peerInfo.clear();
     this.cachedRoomSettings = null;
+    this.cachedHeirSecrets = null;
 
     this.updateConnectionInfo();
     // Clear the room
@@ -1573,6 +1643,45 @@ export class EnigmaJS {
   }
 
   /**
+   * Handle heir-secrets message (secrets sent by host to potential heir)
+   * @param {Object} data - Message data with encrypted secrets
+   */
+  async handleHeirSecrets(data) {
+    // Only process if we are the target
+    if (data.target !== this.peerId) {
+      return;
+    }
+
+    // Must be from the current host
+    if (data.sender !== this.hostPeerId) {
+      this.log("Ignoring heir-secrets from non-host", "warn");
+      return;
+    }
+
+    // Decrypt and cache the secrets using ECDH
+    const hostKeys = this.peerKeys.get(data.sender);
+    if (!hostKeys || !hostKeys.epub) {
+      this.log("Cannot decrypt heir-secrets: missing host keys", "warn");
+      return;
+    }
+
+    try {
+      const dhKey = await SEA.secret(hostKeys.epub, this.seaKeyPair);
+      this.cachedHeirSecrets = {
+        sharedSecret: data.encryptedSharedSecret
+          ? await SEA.decrypt(data.encryptedSharedSecret, dhKey)
+          : null,
+        roomPassword: data.encryptedRoomPassword
+          ? await SEA.decrypt(data.encryptedRoomPassword, dhKey)
+          : null,
+      };
+      this.log("Received heir secrets from host", "info");
+    } catch (e) {
+      this.log(`Failed to decrypt heir-secrets: ${e.message}`, "warn");
+    }
+  }
+
+  /**
    * Kick a user from the room (host only)
    * @param {string} peerId - ID of peer to kick
    */
@@ -1621,6 +1730,9 @@ export class EnigmaJS {
     if (this.peers.size > 0) {
       await this.rekeyRoom();
     }
+
+    // Update heir secrets since peer list changed
+    await this.sendHeirSecrets();
 
     this.updateConnectionInfo();
   }
@@ -1809,6 +1921,8 @@ export class EnigmaJS {
       "success",
       true,
     );
+    // Update heir secrets with new password
+    await this.sendHeirSecrets();
   }
 
   /**

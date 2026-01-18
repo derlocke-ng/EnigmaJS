@@ -1,5 +1,19 @@
 # EnigmaJS Changelog
 
+## [2.2.0] - 2026-01-18 - Heir Secrets
+
+### 🔐 New Feature
+
+- **Password survives host disconnect** - Host now proactively sends encrypted secrets (roomPassword, sharedSecret) to the next-in-line peer. If host disconnects unexpectedly, the heir can take over with password intact.
+
+### Technical Details
+
+- New `heir-secrets` message type with ECDH encryption
+- Secrets updated when: peer joins, peer kicked, password changes
+- `selfPromote()` uses cached heir secrets if available
+
+---
+
 ## [2.1.1] - 2026-01-18 - Race Condition Fix
 
 ### Bug Fixes
