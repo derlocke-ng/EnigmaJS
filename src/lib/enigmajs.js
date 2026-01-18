@@ -1,0 +1,1499 @@
+/**
+ * EnigmaJS - Encrypted and decentralized web-chat using Gun.js and Vue.js
+ *
+ * A decentralized and end-to-end encrypted chat system for web-browsers
+ * using Gun.js for data synchronization and Gun SEA for encryption.
+ *
+ * @class EnigmaJS
+ */
+export class EnigmaJS {
+  constructor(options = {}) {
+    this.gun = null;
+    this.room = null;
+    this.peerId = null;
+    this.roomId = null;
+    this.isHost = false;
+    this.verbose = false;
+    this.username = options.username || "Anonymous";
+
+    // Callbacks for UI updates
+    this.onLog = options.onLog || console.log;
+    this.onStatusChange = options.onStatusChange || (() => {});
+    this.onConnection = options.onConnection || (() => {});
+    this.onConnectionInfo = options.onConnectionInfo || (() => {});
+    this.onMessageReceived = options.onMessageReceived || (() => {});
+    this.onPromoted = options.onPromoted || (() => {});
+
+    // Connection state
+    this.status = "disconnected";
+    this.connected = false;
+    this.peers = new Set();
+    this.peerInfo = new Map(); // Store username and color for each peer
+    this.peerLastSeen = new Map();
+    this.processedMessages = new Set();
+    this.messageCount = 0;
+    this.lastMessageTime = null;
+
+    // Gun SEA - full keypair for encryption and signing
+    this.seaKeyPair = null;
+    this.peerKeys = new Map(); // Store full SEA keys (epub) for each peer
+
+    // Shared secret for group encryption (derived via SEA)
+    this.sharedSecret = null;
+
+    // Room management settings
+    this.maxUsers = options.maxUsers || 10; // Default max 10 users
+    this.roomPassword = null;
+    this.isPublic = false; // Private by default
+    this.roomName = null; // Optional room name for public listing
+    this.kickedUsers = new Set(); // Track kicked user IDs
+    this.joinedAt = null; // Timestamp when we joined the room
+    this.hostPeerId = null; // Track who the host is (for auto-promote)
+    this.peerJoinOrder = []; // Track order peers joined (for auto-promote)
+
+    // Network quality tracking
+    this.pendingPings = new Map(); // Track ping timestamps
+    this.latencyHistory = []; // Rolling history of latencies
+    this.networkQuality = "unknown"; // 'excellent', 'good', 'fair', 'poor', 'unknown'
+    this.onNetworkQualityChange = options.onNetworkQualityChange || (() => {});
+  }
+
+  /**
+   * Initialize SEA encryption keypair
+   * @returns {Promise<void>}
+   */
+  async initSEA() {
+    this.seaKeyPair = await SEA.pair();
+  }
+
+  /**
+   * Start periodic check for peer timeouts
+   */
+  startPeerTimeoutChecker() {
+    setInterval(() => {
+      if (!this.connected || this.peers.size === 0) return;
+      const now = Date.now();
+      for (const peerId of this.peers) {
+        const lastSeen = this.peerLastSeen.get(peerId) || now;
+        if (now - lastSeen > 30000) {
+          this.handlePeerLeave(peerId);
+        }
+      }
+    }, 10000);
+  }
+
+  /**
+   * Handle peer leaving the room
+   * @param {string} peerId - ID of peer that left
+   */
+  handlePeerLeave(peerId) {
+    const info = this.peerInfo.get(peerId);
+    const username = info ? info.username : "Unknown";
+
+    // Check if the host left
+    const hostLeft = peerId === this.hostPeerId;
+
+    this.peers.delete(peerId);
+    this.peerInfo.delete(peerId);
+    this.peerKeys.delete(peerId);
+    this.peerLastSeen.delete(peerId);
+
+    // Remove from join order
+    this.peerJoinOrder = this.peerJoinOrder.filter((id) => id !== peerId);
+
+    this.log(`${username} left the room`, "warn", true);
+
+    // If host left and we're not the host, check for auto-promote
+    if (hostLeft && !this.isHost) {
+      this.handleHostLeft();
+    }
+
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Handle when the host leaves - auto-promote oldest peer
+   */
+  handleHostLeft() {
+    this.log("Host has disconnected", "warn", true);
+
+    // In decentralized systems, we need a deterministic way to pick a new host
+    // Use lexicographically smallest peerId among all remaining peers (including self)
+    const remainingPeers = [...this.peers]; // Other peers still connected
+    const allCandidates = [...remainingPeers, this.peerId].sort();
+
+    this.log(
+      `Auto-promote candidates: ${allCandidates.join(", ")} (self: ${this.peerId})`,
+      "info",
+    );
+
+    if (allCandidates[0] === this.peerId) {
+      // We have the smallest peer ID - we become host
+      this.selfPromote();
+    } else {
+      // Someone else will become host
+      this.hostPeerId = allCandidates[0];
+      const newHostInfo = this.peerInfo.get(this.hostPeerId);
+      const newHostName = newHostInfo ? newHostInfo.username : "Unknown";
+      this.log(
+        `Waiting for ${newHostName} to become the new host`,
+        "info",
+        true,
+      );
+    }
+  }
+
+  /**
+   * Self-promote to host (when original host leaves)
+   */
+  selfPromote() {
+    this.log("You are now the host (auto-promoted)", "success", true);
+    this.isHost = true;
+    this.hostPeerId = this.peerId;
+
+    // Note: We already have the sharedSecret from the welcome message
+    // We don't have kickedUsers or roomPassword from old host though
+    this.kickedUsers = new Set();
+    this.roomPassword = null;
+
+    this.updateConnectionInfo();
+
+    // Notify UI
+    if (this.onPromoted) {
+      this.onPromoted();
+    }
+
+    // Broadcast that we're the new host so others know
+    const promoteNotifyMsg = {
+      id: this.generateId(),
+      type: "promote-notify",
+      sender: this.peerId,
+      oldHost: this.hostPeerId,
+      newHost: this.peerId,
+      timestamp: Date.now(),
+    };
+    this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
+  }
+
+  /**
+   * Generate a consistent color from a string (username or peerId)
+   * Colors constrained to warm spectrum (red/orange/yellow) to match Rockstar Energy Peach theme
+   * @param {string} str - String to generate color from
+   * @returns {string} HSL color string
+   */
+  generateColorFromString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+
+    // Constrain to warm colors (0-60 = red to orange to yellow)
+    const hue = Math.abs(hash % 60);
+    // Higher saturation for vibrant, energetic feel
+    const saturation = 70 + (Math.abs(hash >> 8) % 25); // 70-95%
+    // Balanced lightness for readability with vibrant colors
+    const lightness = 60 + (Math.abs(hash >> 16) % 20); // 60-80%
+
+    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+  }
+
+  /**
+   * Calculate contrasting text color (black or white) based on background
+   * @param {string} backgroundColor - HSL color string
+   * @returns {string} Hex color for text
+   */
+  getContrastingTextColor(backgroundColor) {
+    // Parse HSL color
+    const match = backgroundColor.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+    if (!match) return "#000";
+
+    const lightness = parseInt(match[3]);
+    // If lightness > 60, use dark text, otherwise use light text
+    return lightness > 60 ? "#000" : "#fff";
+  }
+
+  /**
+   * Log a message with filtering based on verbose mode
+   * @param {string} message - Message to log
+   * @param {string} type - Log type ('info', 'success', 'warn', 'error')
+   * @param {boolean} force - Force logging regardless of verbose setting
+   */
+  log(message, type = "info", force = false) {
+    // Filter verbose messages unless enabled or forced
+    if (!force && !this.verbose && type === "info") return;
+
+    const timestamp = new Date().toLocaleTimeString();
+    this.onLog({ timestamp, message, type });
+  }
+
+  /**
+   * Enable or disable verbose logging
+   * @param {boolean} enabled - Whether to enable verbose logging
+   */
+  setVerbose(enabled) {
+    this.verbose = enabled;
+    this.log(
+      `Verbose logging ${enabled ? "enabled" : "disabled"}`,
+      "info",
+      true,
+    );
+  }
+
+  /**
+   * Set connection status and notify callbacks
+   * @param {string} status - Status ('disconnected', 'connecting', 'waiting', 'connected')
+   * @param {string|null} errorMsg - Optional error message
+   */
+  setStatus(status, errorMsg = null) {
+    this.status = status;
+    this.onStatusChange(status, errorMsg);
+    if (errorMsg) {
+      this.log(`Status: ${status} - ${errorMsg}`, "error", true);
+    } else if (this.verbose) {
+      this.log(`Status: ${status}`, "info", true);
+    }
+  }
+
+  /**
+   * Generate a unique ID for messages
+   * @returns {string} Unique identifier
+   */
+  generateId() {
+    if (window.crypto && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+    return "msg_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9);
+  }
+
+  /**
+   * Generate readable room/peer IDs like "FIRE-3K7-WXYZ"
+   * @returns {string} Human-readable ID
+   */
+  generatePeerId() {
+    // Exclude confusing chars (0, O, 1, I)
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const words = [
+      "FIRE",
+      "BOLT",
+      "WAVE",
+      "STAR",
+      "NOVA",
+      "DASH",
+      "GLOW",
+      "ZOOM",
+      "APEX",
+      "CYAN",
+      "ECHO",
+      "FLEX",
+      "VOLT",
+      "ZETA",
+      "BLUR",
+      "RUSH",
+      "FURY",
+      "BEAM",
+      "NEON",
+      "PEAK",
+    ];
+
+    const word = words[Math.floor(Math.random() * words.length)];
+    let segment1 = "";
+    let segment2 = "";
+
+    for (let i = 0; i < 3; i++) {
+      segment1 += chars[Math.floor(Math.random() * chars.length)];
+    }
+    for (let i = 0; i < 4; i++) {
+      segment2 += chars[Math.floor(Math.random() * chars.length)];
+    }
+
+    return `${word}-${segment1}-${segment2}`;
+  }
+
+  /**
+   * Initialize Gun.js network connection with multiple public relays
+   */
+  initGun() {
+    // Multiple public Gun.js relay servers for redundancy and better connectivity
+    const peers = [
+      // Primary relays
+      "https://gun-manhattan.herokuapp.com/gun",
+      "https://gun-us.herokuapp.com/gun",
+      "https://gun-eu.herokuapp.com/gun",
+      // Community relays
+      "https://gun-gun.herokuapp.com/gun",
+      "https://gunjs.herokuapp.com/gun",
+      "https://gun.o8.is/gun",
+      // Additional public relays
+      "https://peer.wallie.io/gun",
+      "https://gundb-relay-mlccl.ondigitalocean.app/gun",
+      "https://gun-relay.scuffle.de/gun",
+      "https://plankton-app-6qfp3.ondigitalocean.app/gun",
+      // Newly added relays
+      "https://gun.defucc.me/gun",
+      "https://shogun-relay.scobrudot.dev/gun",
+      "https://relay.peer.ooo/gun",
+    ];
+
+    this.gun = Gun({ peers, localStorage: false, radisk: false });
+    if (this.verbose) {
+      this.log(`Gun initialized with ${peers.length} relay peers`, "success");
+    }
+  }
+
+  /**
+   * Initialize as host and create a new room
+   * @returns {Promise<void>}
+   */
+  async initHost() {
+    this.setStatus("connecting");
+
+    if (!this.seaKeyPair) {
+      await this.initSEA();
+      this.log("SEA keypair generated", "info");
+    }
+
+    // Generate cryptographically secure password for room encryption
+    const randomBytes = new Uint8Array(32);
+    crypto.getRandomValues(randomBytes);
+    this.sharedSecret = Array.from(randomBytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    this.log(
+      `Room password generated (length: ${this.sharedSecret.length})`,
+      "info",
+    );
+
+    this.peerId = this.generatePeerId();
+    this.roomId = this.generatePeerId();
+    this.isHost = true;
+    this.hostPeerId = this.peerId; // We are the host
+    this.joinedAt = Date.now();
+    this.log(`Room ID: ${this.roomId}, Peer ID: ${this.peerId}`, "info");
+
+    this.initGun();
+    this.room = this.gun.get("enigmajs").get(this.roomId);
+    this.log("Gun network initialized, room created", "info");
+
+    this.setStatus("waiting");
+    this.onConnection({ type: "host-ready", peerId: this.roomId });
+    this.log("Room created, waiting for connections...", "success", true);
+    this.setupMessageListener();
+    this.log("Message listener active", "info");
+    this.updateConnectionInfo();
+    this.startHeartbeat();
+    this.startPeerTimeoutChecker();
+    this.startBackgroundKeepAlive();
+  }
+
+  /**
+   * Connect to an existing room as a peer
+   * @param {string} roomId - Room ID to connect to
+   * @param {string} [password] - Optional room password
+   * @returns {Promise<void>}
+   */
+  async connectToPeer(roomId, password = null) {
+    this.setStatus("connecting");
+
+    if (!this.seaKeyPair) {
+      await this.initSEA();
+      this.log("SEA keypair generated", "info");
+    }
+
+    this.peerId = this.generatePeerId();
+    this.roomId = roomId;
+    this.isHost = false;
+    this.joinedAt = Date.now();
+    this.log(`Peer ID: ${this.peerId}`, "info");
+
+    this.initGun();
+    this.room = this.gun.get("enigmajs").get(this.roomId);
+    this.log(`Connecting to room: ${this.roomId}`, "info");
+
+    this.setupMessageListener();
+    this.log("Message listener active", "info");
+
+    // Send join message with SEA keys
+    const joinMsg = {
+      id: this.generateId(),
+      type: "join",
+      sender: this.peerId,
+      username: this.username,
+      epub: this.seaKeyPair.epub, // Encryption public key
+      pub: this.seaKeyPair.pub, // Signing public key
+      password: password, // Room password if required
+      timestamp: Date.now(),
+    };
+    this.room.get("messages").get(joinMsg.id).put(joinMsg);
+    this.log(
+      `Joining room with epub: ${this.seaKeyPair.epub.substring(0, 16)}...`,
+      "info",
+    );
+    this.log("Joining room...", "info", true);
+    this.setStatus("waiting");
+    this.updateConnectionInfo();
+    this.startHeartbeat();
+    this.startPeerTimeoutChecker();
+    this.startBackgroundKeepAlive();
+  }
+
+  /**
+   * Send periodic ping messages to keep connection alive
+   */
+  startHeartbeat() {
+    // Send ping every 30 seconds to keep connection alive
+    this.heartbeatInterval = setInterval(() => {
+      // Update public listing even when waiting for connections (host not yet "connected")
+      if (this.isHost && this.isPublic && this.room) {
+        this.updatePublicListing();
+      }
+
+      if (this.connected && this.room) {
+        this.sendPing();
+      }
+    }, 30000);
+  }
+
+  /**
+   * Start background keep-alive mechanisms to prevent disconnect when tab sleeps
+   */
+  startBackgroundKeepAlive() {
+    // Track visibility changes
+    this.lastVisibilityChange = Date.now();
+    this.wasHidden = false;
+
+    // When tab becomes visible again, immediately reconnect if needed
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        this.wasHidden = true;
+        this.lastVisibilityChange = Date.now();
+      } else {
+        // Tab became visible again
+        const hiddenDuration = Date.now() - this.lastVisibilityChange;
+
+        if (this.wasHidden && hiddenDuration > 5000 && this.connected) {
+          // Been hidden for more than 5 seconds, send immediate ping to verify connection
+          this.log("Resuming from background, checking connection...", "info");
+          this.sendPing();
+
+          // If hidden for a long time, do multiple rapid pings
+          if (hiddenDuration > 30000) {
+            setTimeout(() => this.sendPing(), 1000);
+            setTimeout(() => this.sendPing(), 3000);
+          }
+        }
+        this.wasHidden = false;
+      }
+    });
+
+    // Use Web Locks API if available to request a lock that prevents page suspension
+    if (navigator.locks) {
+      this.requestWakeLock();
+    }
+
+    // Use a more aggressive keep-alive for mobile browsers
+    // ServiceWorker periodic sync would be ideal but requires more setup
+    // For now, use a secondary interval that's more frequent
+    this.mobileKeepAlive = setInterval(() => {
+      if (this.connected && this.room && document.hidden) {
+        // Send a lightweight ping even when hidden
+        this.sendPing();
+      }
+    }, 15000); // Every 15 seconds when hidden
+  }
+
+  /**
+   * Request a wake lock to prevent page suspension (where supported)
+   */
+  async requestWakeLock() {
+    // Web Locks API - request a shared lock that we hold
+    // This signals to the browser that we have an active connection
+    try {
+      await navigator.locks.request(
+        "enigmajs-connection",
+        { mode: "shared" },
+        async () => {
+          // Hold the lock as long as we're connected
+          return new Promise((resolve) => {
+            this.releaseLock = resolve;
+          });
+        },
+      );
+    } catch (e) {
+      // Lock API not supported or failed, ignore
+    }
+  }
+
+  /**
+   * Set up listener for incoming messages
+   */
+  setupMessageListener() {
+    this.room
+      .get("messages")
+      .map()
+      .on((data, key) => {
+        if (!data || !data.id || !data.type || !data.sender) return;
+
+        // Skip messages from before we joined (Gun replays history)
+        if (
+          data.timestamp &&
+          this.joinedAt &&
+          data.timestamp < this.joinedAt - 5000
+        ) {
+          return; // Ignore messages from before we joined (5s grace period)
+        }
+
+        if (this.processedMessages.has(data.id)) {
+          return;
+        }
+        this.processedMessages.add(data.id);
+
+        if (data.sender === this.peerId) {
+          return;
+        }
+
+        this.peerLastSeen.set(data.sender, Date.now());
+
+        // Route message to appropriate handler
+        switch (data.type) {
+          case "join":
+            this.log(
+              `Received JOIN from ${data.username || data.sender}`,
+              "info",
+            );
+            Promise.resolve(this.handleJoin(data));
+            break;
+          case "welcome":
+            this.log(
+              `Received WELCOME from ${data.username || data.sender}`,
+              "info",
+            );
+            Promise.resolve(this.handleWelcome(data));
+            break;
+          case "message":
+            // Only process messages if we have the shared secret
+            if (this.sharedSecret) {
+              Promise.resolve(this.handleMessage(data));
+            }
+            break;
+          case "reject":
+            this.handleReject(data);
+            break;
+          case "kick":
+            this.handleKick(data);
+            break;
+          case "kick-notify":
+            this.handleKickNotify(data);
+            break;
+          case "user-joined":
+            this.handleUserJoined(data);
+            break;
+          case "promote-notify":
+            this.handlePromoteNotify(data);
+            break;
+          case "room-destroyed":
+            this.handleRoomDestroyed(data);
+            break;
+          case "ping":
+            this.handlePing(data);
+            break;
+          case "pong":
+            this.handlePong(data);
+            break;
+        }
+      });
+  }
+
+  /**
+   * Handle incoming join message
+   * @param {Object} data - Join message data
+   * @returns {Promise<void>}
+   */
+  async handleJoin(data) {
+    const displayName = data.username || "Anonymous";
+
+    // Only HOST processes join requests and decides who gets in
+    // Other clients wait for welcome-ack or user-joined notifications
+    if (!this.isHost) {
+      // Non-hosts just log that someone is trying to join
+      this.log(`${displayName} is trying to join...`, "info");
+      return;
+    }
+
+    // Check if user was kicked
+    if (this.kickedUsers.has(data.sender)) {
+      this.log(`Rejected join from kicked user: ${displayName}`, "warn", true);
+      return;
+    }
+
+    // Check room size limit (host)
+    if (this.peers.size >= this.maxUsers) {
+      this.log(`Room full, rejected: ${displayName}`, "warn", true);
+      // Send rejection message
+      const rejectMsg = {
+        id: this.generateId(),
+        type: "reject",
+        sender: this.peerId,
+        target: data.sender,
+        reason: "Room is full",
+        timestamp: Date.now(),
+      };
+      this.room.get("messages").get(rejectMsg.id).put(rejectMsg);
+      return;
+    }
+
+    // Check password if set
+    if (
+      this.isHost &&
+      this.roomPassword &&
+      data.password !== this.roomPassword
+    ) {
+      this.log(`Wrong password from: ${displayName}`, "warn", true);
+      const rejectMsg = {
+        id: this.generateId(),
+        type: "reject",
+        sender: this.peerId,
+        target: data.sender,
+        reason: "Incorrect password",
+        timestamp: Date.now(),
+      };
+      this.room.get("messages").get(rejectMsg.id).put(rejectMsg);
+      return;
+    }
+
+    this.log(`${displayName} joined`, "success", true);
+
+    this.peers.add(data.sender);
+    this.peerInfo.set(data.sender, {
+      username: displayName,
+      color: this.generateColorFromString(data.sender),
+    });
+
+    // Track join order for auto-promote
+    if (!this.peerJoinOrder.includes(data.sender)) {
+      this.peerJoinOrder.push(data.sender);
+    }
+
+    // Store peer's SEA keys for encryption
+    if (data.epub) {
+      this.peerKeys.set(data.sender, { epub: data.epub, pub: data.pub });
+    }
+
+    // Host sends welcome with encrypted shared secret
+    if (this.isHost && data.epub) {
+      try {
+        if (!this.seaKeyPair || !this.sharedSecret) {
+          this.log("Cannot welcome new user: missing keys", "error", true);
+          return;
+        }
+
+        // Derive shared secret using ECDH via SEA
+        const dhKey = await SEA.secret(data.epub, this.seaKeyPair);
+
+        // Encrypt the room password using the ECDH key
+        const encryptedSecret = await SEA.encrypt(this.sharedSecret, dhKey);
+
+        // Build list of existing peers to share with new joiner
+        const existingPeers = [];
+        for (const [peerId, info] of this.peerInfo.entries()) {
+          if (peerId !== data.sender) {
+            existingPeers.push({ id: peerId, username: info.username });
+          }
+        }
+
+        const welcomeMsg = {
+          id: this.generateId(),
+          type: "welcome",
+          sender: this.peerId,
+          username: this.username,
+          target: data.sender,
+          epub: this.seaKeyPair.epub,
+          pub: this.seaKeyPair.pub,
+          encryptedSecret: encryptedSecret,
+          peers: JSON.stringify(existingPeers), // Send as JSON string for Gun
+          timestamp: Date.now(),
+        };
+        this.room.get("messages").get(welcomeMsg.id).put(welcomeMsg);
+
+        // Notify existing peers about the new user
+        const userJoinedMsg = {
+          id: this.generateId(),
+          type: "user-joined",
+          sender: this.peerId,
+          newUser: data.sender,
+          newUsername: displayName,
+          timestamp: Date.now(),
+        };
+        this.room.get("messages").get(userJoinedMsg.id).put(userJoinedMsg);
+
+        this.connected = true;
+        this.setStatus("connected");
+      } catch (e) {
+        this.log(`Key exchange error: ${e.message}`, "error", true);
+      }
+    }
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Handle incoming welcome message
+   * @param {Object} data - Welcome message data
+   * @returns {Promise<void>}
+   */
+  async handleWelcome(data) {
+    if (data.target !== this.peerId) return;
+
+    const hostName = data.username || "Host";
+    this.log(`Connected to ${hostName}'s room`, "success", true);
+
+    // Track who the host is
+    this.hostPeerId = data.sender;
+
+    this.peers.add(data.sender);
+    this.peerInfo.set(data.sender, {
+      username: hostName,
+      color: this.generateColorFromString(data.sender),
+    });
+
+    // Host is first in join order
+    this.peerJoinOrder = [data.sender];
+
+    // Add existing peers from the host's list
+    if (data.peers) {
+      try {
+        const existingPeers = JSON.parse(data.peers);
+        for (const peer of existingPeers) {
+          this.peers.add(peer.id);
+          this.peerInfo.set(peer.id, {
+            username: peer.username,
+            color: this.generateColorFromString(peer.id),
+          });
+          // Add to join order (they joined before us)
+          this.peerJoinOrder.push(peer.id);
+        }
+        if (existingPeers.length > 0) {
+          this.log(
+            `Found ${existingPeers.length} other user(s) in room`,
+            "info",
+            true,
+          );
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+
+    // Store host's SEA keys
+    if (data.epub) {
+      this.peerKeys.set(data.sender, { epub: data.epub, pub: data.pub });
+
+      // Decrypt shared secret from host using ECDH
+      if (data.encryptedSecret) {
+        try {
+          // Derive the same shared key using ECDH
+          const dhKey = await SEA.secret(data.epub, this.seaKeyPair);
+
+          const decrypted = await SEA.decrypt(data.encryptedSecret, dhKey);
+
+          if (decrypted) {
+            this.sharedSecret = decrypted;
+          } else {
+            throw new Error("Decryption returned null");
+          }
+        } catch (e) {
+          this.log(`Key exchange failed: ${e.message}`, "error", true);
+        }
+      }
+    }
+
+    this.connected = true;
+    this.setStatus("connected");
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Handle incoming encrypted message
+   * @param {Object} data - Message data
+   * @returns {Promise<void>}
+   */
+  async handleMessage(data) {
+    if (!data.encrypted) {
+      return;
+    }
+
+    const sender = data.sender || "Unknown";
+    const peerInfo = this.peerInfo.get(sender) || {
+      username: "Anonymous",
+      color: "#666",
+    };
+
+    if (!this.sharedSecret) {
+      return; // Silently skip - we don't have the key yet
+    }
+
+    let message = null;
+    try {
+      message = await SEA.decrypt(data.encrypted, this.sharedSecret);
+      if (!message) return; // Decryption failed, likely old message with different key
+      // Ensure message is a string
+      if (typeof message !== "string") {
+        message = String(message);
+      }
+      this.log(
+        `Message from ${peerInfo.username}: "${message.substring(0, 50)}${message.length > 50 ? "..." : ""}"`,
+        "info",
+      );
+    } catch (e) {
+      return; // Silently fail - probably old message
+    }
+
+    this.messageCount++;
+    this.lastMessageTime = new Date().toLocaleTimeString();
+    this.onMessageReceived({
+      sender,
+      username: peerInfo.username,
+      color: peerInfo.color,
+      message,
+    });
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Handle incoming ping message
+   * @param {Object} data - Ping message data
+   */
+  handlePing(data) {
+    const pongMsg = {
+      id: this.generateId(),
+      type: "pong",
+      sender: this.peerId,
+      target: data.sender,
+      pingId: data.id,
+      timestamp: Date.now(),
+    };
+    this.room.get("messages").get(pongMsg.id).put(pongMsg);
+  }
+
+  /**
+   * Handle incoming pong message
+   * @param {Object} data - Pong message data
+   */
+  handlePong(data) {
+    if (data.target !== this.peerId) return;
+
+    // Calculate latency from ping timestamp
+    if (data.pingId && this.pendingPings.has(data.pingId)) {
+      const sentTime = this.pendingPings.get(data.pingId);
+      const latency = Date.now() - sentTime;
+      this.pendingPings.delete(data.pingId);
+
+      // Add to latency history (keep last 10)
+      this.latencyHistory.push(latency);
+      if (this.latencyHistory.length > 10) {
+        this.latencyHistory.shift();
+      }
+
+      // Update network quality based on average latency
+      this.updateNetworkQuality();
+    }
+  }
+
+  /**
+   * Update network quality based on latency history
+   * Note: This measures Gun.js relay round-trip, not direct peer latency
+   * Typical relay latency is 500-2000ms depending on server locations
+   */
+  updateNetworkQuality() {
+    if (this.latencyHistory.length === 0) {
+      this.networkQuality = "unknown";
+      return;
+    }
+
+    const avg =
+      this.latencyHistory.reduce((a, b) => a + b, 0) /
+      this.latencyHistory.length;
+    let quality;
+
+    // Thresholds adjusted for Gun.js relay (not direct P2P)
+    if (avg < 250) {
+      quality = "excellent";
+    } else if (avg < 800) {
+      quality = "good";
+    } else if (avg < 1500) {
+      quality = "fair";
+    } else {
+      quality = "poor";
+    }
+
+    if (quality !== this.networkQuality) {
+      this.networkQuality = quality;
+      this.onNetworkQualityChange(quality, Math.round(avg));
+    }
+  }
+
+  /**
+   * Get current network quality info
+   * @returns {Object} Network quality info
+   */
+  getNetworkInfo() {
+    const avg =
+      this.latencyHistory.length > 0
+        ? Math.round(
+            this.latencyHistory.reduce((a, b) => a + b, 0) /
+              this.latencyHistory.length,
+          )
+        : null;
+    return {
+      quality: this.networkQuality,
+      latency: avg,
+      samples: this.latencyHistory.length,
+    };
+  }
+
+  /**
+   * Handle rejection message (room full, wrong password, etc.)
+   * @param {Object} data - Rejection message data
+   */
+  handleReject(data) {
+    if (data.target !== this.peerId) return;
+    const reason = data.reason || "Connection rejected";
+    this.log(`Rejected: ${reason}`, "error", true);
+    this.setStatus("disconnected", reason);
+    this.connected = false;
+    // Clear the room
+    if (this.room) {
+      this.room = null;
+    }
+  }
+
+  /**
+   * Handle room destroyed message
+   * @param {Object} data - Room destroyed message data
+   */
+  handleRoomDestroyed(data) {
+    this.log("Room has been closed by the host", "error", true);
+    this.setStatus("disconnected", "Room destroyed");
+    this.connected = false;
+    this.peers.clear();
+    this.peerInfo.clear();
+    // Clear the room
+    if (this.room) {
+      this.room = null;
+    }
+  }
+
+  /**
+   * Handle incoming kick message
+   * @param {Object} data - Kick message data
+   */
+  handleKick(data) {
+    if (data.target !== this.peerId) return;
+    this.log("You have been kicked from the room", "error", true);
+    this.setStatus("disconnected", "Kicked by host");
+    this.connected = false;
+    this.peers.clear();
+    this.peerInfo.clear();
+    this.updateConnectionInfo();
+    // Clear the room
+    if (this.room) {
+      this.room = null;
+    }
+  }
+
+  /**
+   * Handle kick notification for other peers
+   * @param {Object} data - Kick notification data
+   */
+  handleKickNotify(data) {
+    // Other clients get notified about the kick
+    if (data.kickedPeer && this.peers.has(data.kickedPeer)) {
+      const userInfo = this.peerInfo.get(data.kickedPeer);
+      const username = userInfo ? userInfo.username : "User";
+      this.log(`${username} was kicked from the room`, "warn", true);
+      this.peers.delete(data.kickedPeer);
+      this.peerInfo.delete(data.kickedPeer);
+      this.peerKeys.delete(data.kickedPeer);
+      this.peerLastSeen.delete(data.kickedPeer);
+      this.updateConnectionInfo();
+    }
+  }
+
+  /**
+   * Handle user-joined notification (from host to other clients)
+   * @param {Object} data - User joined notification data
+   */
+  handleUserJoined(data) {
+    // Host already has this user, skip
+    if (this.isHost) return;
+
+    // Add the new user to our peer list
+    if (
+      data.newUser &&
+      data.newUser !== this.peerId &&
+      !this.peers.has(data.newUser)
+    ) {
+      const displayName = data.newUsername || "Anonymous";
+      this.log(`${displayName} joined`, "success", true);
+
+      this.peers.add(data.newUser);
+      this.peerInfo.set(data.newUser, {
+        username: displayName,
+        color: this.generateColorFromString(data.newUser),
+      });
+
+      // Track join order for auto-promote
+      if (!this.peerJoinOrder.includes(data.newUser)) {
+        this.peerJoinOrder.push(data.newUser);
+      }
+
+      this.updateConnectionInfo();
+    }
+  }
+
+  /**
+   * Handle host promotion notification
+   * @param {Object} data - Promotion notification data
+   */
+  handlePromoteNotify(data) {
+    // Update who the host is
+    this.hostPeerId = data.newHost;
+
+    // Check if we're the new host
+    if (data.newHost === this.peerId) {
+      this.log("You are now the host!", "success", true);
+
+      // Set host state
+      this.isHost = true;
+      // Only take sharedSecret if provided (manual promote has it, auto-promote doesn't)
+      if (data.sharedSecret) {
+        this.sharedSecret = data.sharedSecret;
+      }
+      this.maxUsers = data.maxUsers || 10;
+      this.roomPassword = data.roomPassword || null;
+      this.isPublic = data.isPublic === "true";
+      this.roomName = data.roomName || null;
+      // Parse kickedUsers from comma-separated string
+      const kickedList = data.kickedUsers
+        ? data.kickedUsers.split(",").filter((x) => x)
+        : [];
+      this.kickedUsers = new Set(kickedList);
+
+      this.updateConnectionInfo();
+
+      // Update public listing if public
+      if (this.isPublic) {
+        this.updatePublicListing();
+      }
+
+      // Trigger UI update
+      if (this.onPromoted) {
+        this.onPromoted();
+      }
+      return;
+    }
+
+    // All other clients get notified about host change
+    const newHostInfo = this.peerInfo.get(data.newHost);
+    const newHostName = newHostInfo ? newHostInfo.username : "User";
+    this.log(`${newHostName} is now the host`, "info", true);
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Kick a user from the room (host only)
+   * @param {string} peerId - ID of peer to kick
+   */
+  kickUser(peerId) {
+    if (!this.isHost) return;
+
+    const userInfo = this.peerInfo.get(peerId);
+    const username = userInfo ? userInfo.username : "User";
+
+    this.kickedUsers.add(peerId);
+
+    // Send kick message to the kicked user
+    const kickMsg = {
+      id: this.generateId(),
+      type: "kick",
+      sender: this.peerId,
+      target: peerId,
+      timestamp: Date.now(),
+    };
+    this.room.get("messages").get(kickMsg.id).put(kickMsg);
+
+    // Notify all other peers about the kick
+    const kickNotifyMsg = {
+      id: this.generateId(),
+      type: "kick-notify",
+      sender: this.peerId,
+      kickedPeer: peerId,
+      timestamp: Date.now(),
+    };
+    this.room.get("messages").get(kickNotifyMsg.id).put(kickNotifyMsg);
+
+    // Remove from local state
+    this.peers.delete(peerId);
+    this.peerInfo.delete(peerId);
+    this.peerKeys.delete(peerId);
+    this.peerLastSeen.delete(peerId);
+
+    this.log(`Kicked ${username} from room`, "warn", true);
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Promote another user to host (host only)
+   * @param {string} peerId - ID of peer to promote
+   */
+  promoteToHost(peerId) {
+    if (!this.isHost) {
+      this.log("Cannot promote: not host", "error", true);
+      return;
+    }
+
+    const userInfo = this.peerInfo.get(peerId);
+    const username = userInfo ? userInfo.username : "User";
+
+    this.log(`Transferring host to ${username}...`, "info", true);
+
+    // Send promote-notify with all data
+    const promoteNotifyMsg = {
+      id: this.generateId(),
+      type: "promote-notify",
+      sender: this.peerId,
+      oldHost: this.peerId,
+      newHost: peerId,
+      sharedSecret: this.sharedSecret,
+      maxUsers: this.maxUsers,
+      roomPassword: this.roomPassword || "",
+      isPublic: this.isPublic ? "true" : "false",
+      roomName: this.roomName || "",
+      kickedUsers: Array.from(this.kickedUsers).join(","), // Convert to string for Gun
+      timestamp: Date.now(),
+    };
+
+    this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
+
+    // Transfer complete - demote self
+    this.isHost = false;
+    this.log(`${username} is now the host`, "success", true);
+    this.updateConnectionInfo();
+  }
+
+  /**
+   * Set room password (host only)
+   * @param {string|null} password - Password to set, or null to remove
+   */
+  setRoomPassword(password) {
+    if (!this.isHost) {
+      this.log("Cannot set password: not host", "error", true);
+      return;
+    }
+    this.roomPassword = password || null;
+    this.log(
+      password ? "Room password set" : "Room password removed",
+      "success",
+      true,
+    );
+  }
+
+  /**
+   * Set maximum users (host only)
+   * @param {number} max - Maximum number of users (1-256)
+   */
+  setMaxUsers(max) {
+    if (!this.isHost) {
+      this.log("Cannot set max users: not host", "error", true);
+      return;
+    }
+    this.maxUsers = Math.min(256, Math.max(1, max));
+    this.log(`Max users set to ${this.maxUsers}`, "success", true);
+  }
+
+  /**
+   * Set room visibility (host only)
+   * @param {boolean} isPublic - Whether the room is public
+   * @param {string|null} roomName - Optional room name for public listing
+   */
+  setRoomVisibility(isPublic, roomName = null) {
+    if (!this.isHost) {
+      this.log("Cannot set visibility: not host", "error", true);
+      return;
+    }
+
+    const wasPublic = this.isPublic;
+    this.isPublic = isPublic;
+    this.roomName = roomName;
+
+    if (isPublic) {
+      this.updatePublicListing();
+      this.log(
+        `Room is now public${roomName ? ` as "${roomName}"` : ""}`,
+        "success",
+        true,
+      );
+    } else {
+      if (wasPublic) {
+        this.removePublicListing();
+      }
+      this.log("Room is now private", "success", true);
+    }
+  }
+
+  /**
+   * Update public room listing in Gun
+   */
+  updatePublicListing() {
+    if (!this.gun || !this.isPublic || !this.isHost) return;
+
+    const listing = {
+      roomId: this.roomId,
+      roomName: this.roomName || `${this.username}'s Room`,
+      hostName: this.username,
+      userCount: this.peers.size + 1,
+      maxUsers: this.maxUsers,
+      hasPassword: !!this.roomPassword,
+      lastUpdate: Date.now(),
+    };
+
+    this.gun.get("enigmajs-public-rooms").get(this.roomId).put(listing);
+  }
+
+  /**
+   * Remove public room listing from Gun
+   */
+  removePublicListing() {
+    if (!this.gun) return;
+    this.gun.get("enigmajs-public-rooms").get(this.roomId).put(null);
+  }
+
+  /**
+   * Get list of public rooms (static method, can be called without instance)
+   * @param {Function} callback - Called with array of public rooms
+   */
+  static getPublicRooms(callback) {
+    const gun = Gun({
+      peers: [
+        "https://gun-manhattan.herokuapp.com/gun",
+        "https://gun-us.herokuapp.com/gun",
+        "https://gun-eu.herokuapp.com/gun",
+        "https://gun-gun.herokuapp.com/gun",
+        "https://gunjs.herokuapp.com/gun",
+        "https://gun.o8.is/gun",
+        "https://peer.wallie.io/gun",
+        "https://gundb-relay-mlccl.ondigitalocean.app/gun",
+        "https://gun-relay.scuffle.de/gun",
+        "https://plankton-app-6qfp3.ondigitalocean.app/gun",
+      ],
+      localStorage: false,
+      radisk: false,
+    });
+
+    const rooms = new Map();
+    const staleThreshold = 90000; // 90 seconds (3x heartbeat interval for safety)
+
+    gun
+      .get("enigmajs-public-rooms")
+      .map()
+      .on((data, roomId) => {
+        if (!data || !data.roomId) {
+          rooms.delete(roomId);
+        } else if (Date.now() - data.lastUpdate < staleThreshold) {
+          rooms.set(roomId, data);
+        } else {
+          rooms.delete(roomId);
+        }
+
+        // Debounce callback
+        clearTimeout(gun._roomsTimeout);
+        gun._roomsTimeout = setTimeout(() => {
+          callback(Array.from(rooms.values()));
+        }, 100);
+      });
+
+    return gun; // Return gun instance so caller can .off() when done
+  }
+
+  /**
+   * Send a ping message
+   */
+  sendPing() {
+    if (!this.room) return;
+    const pingId = this.generateId();
+    const pingMsg = {
+      id: pingId,
+      type: "ping",
+      sender: this.peerId,
+      timestamp: Date.now(),
+    };
+    // Track this ping for latency measurement
+    this.pendingPings.set(pingId, Date.now());
+    // Clean up old pending pings (> 10 seconds old)
+    for (const [id, time] of this.pendingPings) {
+      if (Date.now() - time > 10000) {
+        this.pendingPings.delete(id);
+      }
+    }
+    this.room.get("messages").get(pingMsg.id).put(pingMsg);
+  }
+
+  /**
+   * Send an encrypted message to the room
+   * @param {string} text - Message text to send
+   * @returns {Promise<void>}
+   */
+  async sendMessage(text) {
+    if (!this.room || !this.sharedSecret) {
+      this.log("Cannot send: not connected or no shared key", "error", true);
+      return;
+    }
+
+    try {
+      this.log(
+        `Encrypting message: "${text.substring(0, 30)}${text.length > 30 ? "..." : ""}"`,
+        "info",
+      );
+
+      // Encrypt using shared secret (simple string password)
+      const encrypted = await SEA.encrypt(text, this.sharedSecret);
+      this.log(`Message encrypted (length: ${encrypted?.length || 0})`, "info");
+
+      const msg = {
+        id: this.generateId(),
+        type: "message",
+        sender: this.peerId,
+        encrypted: encrypted,
+        timestamp: Date.now(),
+      };
+
+      this.room.get("messages").get(msg.id).put(msg);
+      this.log("Message sent to Gun network", "info");
+
+      this.messageCount++;
+      this.lastMessageTime = new Date().toLocaleTimeString();
+      this.updateConnectionInfo();
+    } catch (e) {
+      this.log(`Send error: ${e.message}`, "error", true);
+    }
+  }
+
+  /**
+   * Update connection info and notify callback
+   */
+  updateConnectionInfo() {
+    this.onConnectionInfo({
+      peerId: this.peerId,
+      roomId: this.roomId,
+      isHost: this.isHost,
+      connected: this.connected,
+      peers: Array.from(this.peers),
+      messageCount: this.messageCount,
+      lastMessageTime: this.lastMessageTime,
+    });
+  }
+
+  /**
+   * Generate QR code for room ID
+   * @param {string} elementId - ID of DOM element to render QR code into
+   * @param {string} peerId - Peer/Room ID to encode
+   */
+  generateQR(elementId, peerId) {
+    const el = document.getElementById(elementId);
+    el.innerHTML = "";
+    new QRCode(el, {
+      text: peerId,
+      width: 256,
+      height: 256,
+      colorDark: "#667eea",
+      colorLight: "#ffffff",
+    });
+    this.log("QR code generated", "success");
+  }
+
+  /**
+   * Start QR code scanner using device camera
+   * @param {HTMLVideoElement} videoElement - Video element to display camera feed
+   * @param {Function} onScan - Callback when QR code is scanned
+   * @returns {Promise<void>}
+   */
+  async startQRScanner(videoElement, onScan) {
+    this.log("Starting QR scanner...", "info");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+      });
+
+      videoElement.srcObject = stream;
+      videoElement.style.display = "block";
+
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      let scanning = true;
+
+      const scan = () => {
+        if (!scanning) return;
+
+        if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+          canvas.width = videoElement.videoWidth;
+          canvas.height = videoElement.videoHeight;
+          ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+          if (code) {
+            this.log(`QR code scanned: ${code.data}`, "success", true);
+            scanning = false;
+            stream.getTracks().forEach((track) => track.stop());
+            videoElement.style.display = "none";
+            onScan(code.data);
+            return;
+          }
+        }
+        requestAnimationFrame(scan);
+      };
+
+      videoElement.addEventListener("loadeddata", () => {
+        this.log("Camera ready, scanning...", "info");
+        scan();
+      });
+    } catch (err) {
+      this.log(`Camera error: ${err.message}`, "error");
+    }
+  }
+
+  /**
+   * Scan QR code from uploaded image file
+   * @param {File} imageFile - Image file to scan
+   * @param {Function} onScan - Callback when QR code is found
+   */
+  scanQRFromImage(imageFile, onScan) {
+    this.log("Scanning QR from image...", "info");
+
+    const canvas = document.getElementById("qr-canvas");
+    const ctx = canvas.getContext("2d");
+    const img = new Image();
+
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+      if (code) {
+        this.log(`QR code found: ${code.data}`, "success", true);
+        onScan(code.data);
+      } else {
+        this.log(`No QR code found in image`, "error");
+      }
+    };
+
+    img.src = URL.createObjectURL(imageFile);
+  }
+}
