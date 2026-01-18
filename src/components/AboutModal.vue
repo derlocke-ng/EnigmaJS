@@ -108,12 +108,12 @@ defineExpose({ open });
 
       <p class="footer">
         <a
-          href="https://github.com/user/enigmajs"
+          href="https://github.com/derlocke-ng/enigmajs"
           target="_blank"
           rel="noopener"
           >Source Code</a
         >
-        • MIT License
+        • PolyForm Noncommercial License 1.0.0
       </p>
     </div>
   </div>
