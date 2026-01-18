@@ -51,6 +51,9 @@ export class EnigmaJS {
     this.hostPeerId = null; // Track who the host is (for auto-promote)
     this.peerJoinOrder = []; // Track order peers joined (for auto-promote)
 
+    // Cached room settings (for auto-promote when host leaves unexpectedly)
+    this.cachedRoomSettings = null;
+
     // Network quality tracking
     this.pendingPings = new Map(); // Track ping timestamps
     this.latencyHistory = []; // Rolling history of latencies
@@ -151,10 +154,19 @@ export class EnigmaJS {
     this.isHost = true;
     this.hostPeerId = this.peerId;
 
-    // Note: We already have the sharedSecret from the welcome message
-    // We don't have kickedUsers or roomPassword from old host though
-    this.kickedUsers = new Set();
-    this.roomPassword = null;
+    // Use cached room settings if available (from last promote-notify we observed)
+    if (this.cachedRoomSettings) {
+      this.maxUsers = this.cachedRoomSettings.maxUsers || 10;
+      this.roomPassword = this.cachedRoomSettings.roomPassword || null;
+      this.isPublic = this.cachedRoomSettings.isPublic || false;
+      this.roomName = this.cachedRoomSettings.roomName || null;
+      this.kickedUsers = new Set(this.cachedRoomSettings.kickedUsers || []);
+      this.log("Restored room settings from cache", "info");
+    } else {
+      // Fallback: no cached settings available
+      this.kickedUsers = new Set();
+      this.roomPassword = null;
+    }
 
     this.updateConnectionInfo();
 
@@ -163,13 +175,18 @@ export class EnigmaJS {
       this.onPromoted();
     }
 
-    // Broadcast that we're the new host so others know
+    // Broadcast that we're the new host so others know (include room settings)
     const promoteNotifyMsg = {
       id: this.generateId(),
       type: "promote-notify",
       sender: this.peerId,
       oldHost: this.hostPeerId,
       newHost: this.peerId,
+      maxUsers: this.maxUsers,
+      roomPassword: this.roomPassword || "",
+      isPublic: this.isPublic ? "true" : "false",
+      roomName: this.roomName || "",
+      kickedUsers: Array.from(this.kickedUsers).join(","),
       timestamp: Date.now(),
     };
     this.room.get("messages").get(promoteNotifyMsg.id).put(promoteNotifyMsg);
@@ -1092,6 +1109,20 @@ export class EnigmaJS {
     }
 
     // All other clients get notified about host change
+    // Cache room settings in case we need to auto-promote later
+    if (data.maxUsers || data.roomPassword || data.kickedUsers) {
+      const kickedList = data.kickedUsers
+        ? data.kickedUsers.split(",").filter((x) => x)
+        : [];
+      this.cachedRoomSettings = {
+        maxUsers: data.maxUsers || 10,
+        roomPassword: data.roomPassword || null,
+        isPublic: data.isPublic === "true",
+        roomName: data.roomName || null,
+        kickedUsers: kickedList,
+      };
+    }
+
     const newHostInfo = this.peerInfo.get(data.newHost);
     const newHostName = newHostInfo ? newHostInfo.username : "User";
     this.log(`${newHostName} is now the host`, "info", true);
