@@ -70,6 +70,19 @@ export class EnigmaJS {
   }
 
   /**
+   * Hash a password using SHA-256
+   * @param {string} password - Plain text password
+   * @returns {Promise<string>} Hex-encoded hash
+   */
+  async hashPassword(password) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  /**
    * Start periodic check for peer timeouts
    */
   startPeerTimeoutChecker() {
@@ -430,6 +443,7 @@ export class EnigmaJS {
     this.log("Message listener active", "info");
 
     // Send join message with SEA keys
+    const hashedPassword = password ? await this.hashPassword(password) : null;
     const joinMsg = {
       id: this.generateId(),
       type: "join",
@@ -437,7 +451,7 @@ export class EnigmaJS {
       username: this.username,
       epub: this.seaKeyPair.epub, // Encryption public key
       pub: this.seaKeyPair.pub, // Signing public key
-      password: password, // Room password if required
+      password: hashedPassword, // Hashed room password
       timestamp: Date.now(),
     };
     this.room.get("messages").get(joinMsg.id).put(joinMsg);
@@ -1215,12 +1229,13 @@ export class EnigmaJS {
    * Set room password (host only)
    * @param {string|null} password - Password to set, or null to remove
    */
-  setRoomPassword(password) {
+  async setRoomPassword(password) {
     if (!this.isHost) {
       this.log("Cannot set password: not host", "error", true);
       return;
     }
-    this.roomPassword = password || null;
+    // Store hashed password
+    this.roomPassword = password ? await this.hashPassword(password) : null;
     this.log(
       password ? "Room password set" : "Room password removed",
       "success",

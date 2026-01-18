@@ -125,9 +125,9 @@ export function useEnigma() {
    * Set room password (host only)
    * @param {string|null} password - Password to set, or null to remove
    */
-  function setRoomPassword(password) {
+  async function setRoomPassword(password) {
     if (!enigmaInstance.value) return;
-    enigmaInstance.value.setRoomPassword(password);
+    await enigmaInstance.value.setRoomPassword(password);
   }
 
   /**
